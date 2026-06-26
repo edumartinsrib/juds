@@ -124,7 +124,7 @@ class DjenImporter:
 
                     self._record_rate_limit(run, djen_page)
                     imported = await self.import_items(client, djen_page.items)
-                    run.total_imported += imported
+                    run.total_imported = (run.total_imported or 0) + imported
                     await self.session.commit()
 
                     if len(djen_page.items) < 100 or page * 100 >= djen_page.count:
