@@ -5,7 +5,13 @@ from sqlalchemy import func, select
 from app.djen import DjenPage, DjenRateLimitError
 from app.importer import DjenImporter
 from app.models import Client, ClientProcess, Communication, CommunicationParty, SearchRun
-from app.utils import CPF_STATUS_PRESENT, normalize_cpf, normalize_name
+from app.utils import (
+    CPF_STATUS_ABSENT,
+    CPF_STATUS_DIVERGENT,
+    CPF_STATUS_PRESENT,
+    normalize_cpf,
+    normalize_name,
+)
 
 
 class FakeDjenClient:
@@ -25,7 +31,15 @@ async def noop_sleep(_: float) -> None:
     return None
 
 
-def djen_item(item_id: int, *, process_number: str = "00012345620248260100") -> dict:
+def djen_item(
+    item_id: int,
+    *,
+    process_number: str = "00012345620248260100",
+    party_cpf: str | None = "123.456.789-01",
+) -> dict:
+    party = {"nome": "Joao da Silva", "polo": "P"}
+    if party_cpf is not None:
+        party["cpf_cnpj"] = party_cpf
     return {
         "id": item_id,
         "hash": f"hash-{item_id}",
@@ -38,9 +52,7 @@ def djen_item(item_id: int, *, process_number: str = "00012345620248260100") -> 
         "meio": "D",
         "link": "https://example.test/comunicacao",
         "nomeClasse": "Procedimento Comum Civel",
-        "destinatarios": [
-            {"nome": "Joao da Silva", "polo": "P", "cpf_cnpj": "123.456.789-01"},
-        ],
+        "destinatarios": [party],
         "destinatarioadvogados": [
             {
                 "advogado": {
@@ -134,3 +146,32 @@ async def test_importer_paginates_by_day(session) -> None:
     assert completed.total_imported == 101
     assert [call["page"] for call in fake.calls] == [1, 2, 1]
     assert await session.scalar(select(func.count(Communication.id))) == 101
+
+
+async def test_importer_classifies_absent_and_divergent_cpf(session) -> None:
+    client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    session.add(client)
+    await session.flush()
+
+    importer = DjenImporter(
+        session,
+        FakeDjenClient([]),
+        sleep=noop_sleep,
+        rate_limit_sleep_seconds=0,
+    )
+    await importer.import_items(
+        client,
+        [
+            djen_item(201, process_number="00012345620248260201", party_cpf=None),
+            djen_item(202, process_number="00012345620248260202", party_cpf="999.999.999-99"),
+        ],
+    )
+    await session.commit()
+
+    statuses = (await session.execute(select(ClientProcess.cpf_status))).scalars().all()
+    assert CPF_STATUS_ABSENT in statuses
+    assert CPF_STATUS_DIVERGENT in statuses

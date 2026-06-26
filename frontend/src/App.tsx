@@ -851,10 +851,14 @@ function highlightTerms(detail: ProcessDetail, client: Client | null): string[] 
     detail.numero_processo,
     "prazo",
     "intimacao",
+    "intimação",
     "citacao",
+    "citação",
     "audiencia",
+    "audiência",
     "julgamento",
     "sentenca",
+    "sentença",
   ];
 }
 
