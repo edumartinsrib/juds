@@ -17,6 +17,9 @@ node_modules/
 dist/
 .vite/
 coverage/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
 
 *.log
 *.sqlite3
