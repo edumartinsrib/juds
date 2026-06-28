@@ -56,9 +56,11 @@ async def test_client_search_run_and_export_flow(session) -> None:
         processes = processes_response.json()
         assert processes[0]["tribunal"] == "TJSP"
         assert processes[0]["cpf_status"] == "presente_no_djen"
+        assert processes[0]["datajud_status"] == "pending"
 
         detail_response = await client.get(f"/api/processes/{processes[0]['id']}")
         detail = detail_response.json()
+        assert detail["datajud"]["status"] == "pending"
         assert detail["timeline"][0]["plain_text"] == "Intimacao com prazo de 10 dias"
         assert detail["lawyers"][0]["name"] == "Maria Advogada"
 
@@ -71,6 +73,7 @@ async def test_client_search_run_and_export_flow(session) -> None:
             "/api/exports", params={"client_id": created["id"], "format": "csv"}
         )
         assert csv_response.status_code == 200
+        assert "datajud_status" in csv_response.text
         assert "Intimacao com prazo" in csv_response.text
 
         xlsx_response = await client.get(

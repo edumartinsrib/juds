@@ -37,6 +37,9 @@ export type ProcessListItem = {
   polo: string | null;
   communications_count: number;
   last_movement_at: string | null;
+  datajud_status: string;
+  datajud_synced_at: string | null;
+  datajud_last_movement_at: string | null;
 };
 
 export type Party = {
@@ -78,7 +81,33 @@ export type CommunicationDetail = Communication & {
   lawyers: Lawyer[];
 };
 
+export type DataJudMovement = {
+  codigo: number | null;
+  nome: string | null;
+  data_hora: string | null;
+  orgao_julgador: string | null;
+  complementos: string[];
+};
+
+export type DataJudInfo = {
+  status: string;
+  alias: string | null;
+  synced_at: string | null;
+  source_updated_at: string | null;
+  filed_at: string | null;
+  last_movement_at: string | null;
+  degree: string | null;
+  secrecy_level: number | null;
+  system: string | null;
+  format: string | null;
+  subjects: string[];
+  movements_count: number;
+  error: string | null;
+  movements: DataJudMovement[];
+};
+
 export type ProcessDetail = ProcessListItem & {
+  datajud: DataJudInfo;
   parties: Party[];
   lawyers: Lawyer[];
   timeline: Communication[];

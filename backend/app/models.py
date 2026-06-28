@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -82,6 +83,30 @@ class Process(TimestampMixin, Base):
     agency: Mapped[str | None] = mapped_column(String(255), nullable=True)
     external_link: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_communication_at: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    datajud_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending", index=True
+    )
+    datajud_alias: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    datajud_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    datajud_source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    datajud_last_movement_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    datajud_filed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    datajud_degree: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    datajud_secrecy_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    datajud_system: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    datajud_format: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    datajud_subjects: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    datajud_movements_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    datajud_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    datajud_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     communications: Mapped[list["Communication"]] = relationship(back_populates="process")
     client_processes: Mapped[list["ClientProcess"]] = relationship(back_populates="process")

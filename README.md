@@ -1,11 +1,13 @@
 # JUDS
 
-Consulta local de comunicações do DJEN por pessoa, com backend FastAPI, worker de importação, PostgreSQL via Docker Compose e frontend React/Vite.
+Consulta local de comunicações do DJEN por pessoa com enriquecimento DataJud por processo, backend FastAPI, worker de importação, PostgreSQL via Docker Compose e frontend React/Vite.
 
 ## Escopo
 
-- Busca pública em `GET /api/v1/comunicacao` usando `nomeParte`, janela incremental padrão de 30 dias e paginação diária com `itensPorPagina=100`.
+- Busca pública no DJEN em `GET /api/v1/comunicacao` usando `nomeParte`, janela incremental padrão de 30 dias e paginação diária com `itensPorPagina=100`.
+- Enriquecimento DataJud por `numeroProcesso` nos endpoints públicos `POST /api_publica_{tribunal}/_search`.
 - Persistência de clientes, execuções de busca, processos, comunicações, partes e advogados.
+- Persistência de capa, classe, órgão, assuntos, grau, sistema, sigilo e movimentos DataJud no processo.
 - CPF é normalizado no backend, mascarado na interface e nunca inferido quando o DJEN não o informa.
 - Texto HTML/XML do DJEN é convertido para texto seguro e o conteúdo bruto é preservado para auditoria.
 - Exportação em CSV e XLSX.
@@ -16,6 +18,8 @@ Consulta local de comunicações do DJEN por pessoa, com backend FastAPI, worker
 cp .env.example .env
 docker compose up --build
 ```
+
+Configure `DATAJUD_API_KEY` no `.env` local para habilitar o enriquecimento DataJud. O `.env.example` mantém apenas o placeholder da chave.
 
 Serviços:
 

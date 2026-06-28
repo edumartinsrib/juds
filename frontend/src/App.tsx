@@ -358,6 +358,11 @@ function ProcessesView({
         cell: ({ row }) => <CpfStatusBadge status={row.original.cpf_status} />,
       },
       {
+        header: "DataJud",
+        accessorKey: "datajud_status",
+        cell: ({ row }) => <DataJudStatusBadge status={row.original.datajud_status} />,
+      },
+      {
         header: "Ultima",
         accessorKey: "last_movement_at",
         cell: ({ row }) => (
@@ -426,7 +431,7 @@ function ProcessesView({
           <LoadingState label="Carregando processos" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] border-separate border-spacing-0 text-left text-sm">
+            <table className="w-full min-w-[880px] border-separate border-spacing-0 text-left text-sm">
               <thead>
                 {table.getHeaderGroups().map((headerGroup) => (
                   <tr key={headerGroup.id}>
@@ -530,6 +535,7 @@ function MovementsView({
               <div className="h-stack flex-wrap gap-2">
                 <Badge>{process.tribunal ?? "Tribunal ausente"}</Badge>
                 <CpfStatusBadge status={process.cpf_status} />
+                <DataJudStatusBadge status={process.datajud_status} />
               </div>
             </button>
           ))}
@@ -545,6 +551,8 @@ function MovementsView({
         ) : detail ? (
           <div className="v-stack gap-4">
             <ProcessSummary detail={detail} />
+            <DataJudSummary detail={detail} />
+            <DataJudMovements detail={detail} />
             <div className="grid gap-3 md:grid-cols-3">
               <SelectFilter label="Tipo" value={typeFilter} options={typeOptions} onChange={setTypeFilter} />
               <SelectFilter
@@ -556,6 +564,10 @@ function MovementsView({
               <SelectFilter label="Data" value={dateFilter} options={dateOptions} onChange={setDateFilter} />
             </div>
             <div className="v-stack gap-3">
+              <div className="h-stack flex-wrap items-center gap-2">
+                <h3 className="text-sm font-semibold">Comunicacoes DJEN</h3>
+                <Badge>{filteredTimeline.length}</Badge>
+              </div>
               {filteredTimeline.map((communication) => (
                 <TimelineItem
                   key={communication.id}
@@ -717,6 +729,77 @@ function ProcessSummary({ detail }: { detail: ProcessDetail }) {
   );
 }
 
+function DataJudSummary({ detail }: { detail: ProcessDetail }) {
+  const datajud = detail.datajud;
+  return (
+    <div className="v-stack gap-3 border-b border-line pb-4">
+      <div className="h-stack flex-wrap items-center gap-2">
+        <h3 className="text-sm font-semibold">DataJud</h3>
+        <DataJudStatusBadge status={datajud.status} />
+        {datajud.alias && <Badge>{datajud.alias}</Badge>}
+        <span className="text-xs text-neutral-600">Sync: {formatDateTime(datajud.synced_at)}</span>
+      </div>
+      <div className="grid gap-3 md:grid-cols-4">
+        <Metric label="Ajuizamento" value={formatDate(datajud.filed_at)} />
+        <Metric label="Ultima Mov." value={formatDateTime(datajud.last_movement_at)} />
+        <Metric label="Grau" value={datajud.degree ?? "Ausente"} />
+        <Metric label="Sigilo" value={datajud.secrecy_level ?? "Ausente"} />
+        <Metric label="Sistema" value={datajud.system ?? "Ausente"} />
+        <Metric label="Formato" value={datajud.format ?? "Ausente"} />
+        <Metric label="Atualizacao" value={formatDateTime(datajud.source_updated_at)} />
+        <Metric label="Movs. DataJud" value={datajud.movements_count} />
+      </div>
+      {datajud.subjects.length > 0 && (
+        <div className="h-stack flex-wrap gap-2">
+          {datajud.subjects.map((subject) => (
+            <Badge key={subject}>{subject}</Badge>
+          ))}
+        </div>
+      )}
+      {datajud.error && <p className="text-sm text-danger">{datajud.error}</p>}
+    </div>
+  );
+}
+
+function DataJudMovements({ detail }: { detail: ProcessDetail }) {
+  const movements = detail.datajud.movements;
+  if (movements.length === 0) {
+    return null;
+  }
+  return (
+    <div className="v-stack gap-3 border-b border-line pb-4">
+      <div className="h-stack flex-wrap items-center gap-2">
+        <h3 className="text-sm font-semibold">Movimentos DataJud</h3>
+        <Badge>{movements.length}</Badge>
+      </div>
+      <div className="v-stack max-h-80 gap-2 overflow-y-auto pr-1">
+        {movements.map((movement, index) => (
+          <article
+            key={`${movement.codigo ?? "sem-codigo"}-${movement.data_hora ?? index}`}
+            className="ui-list-item v-stack gap-2"
+          >
+            <div className="h-stack flex-wrap items-center gap-2">
+              <Badge>{movement.codigo ?? "Sem codigo"}</Badge>
+              <span className="text-sm font-semibold">{movement.nome ?? "Movimento sem nome"}</span>
+              <span className="text-xs text-neutral-600">{formatDateTime(movement.data_hora)}</span>
+            </div>
+            {movement.orgao_julgador && (
+              <span className="text-xs text-neutral-600">{movement.orgao_julgador}</span>
+            )}
+            {movement.complementos.length > 0 && (
+              <div className="h-stack flex-wrap gap-2">
+                {movement.complementos.map((complement) => (
+                  <Badge key={complement}>{complement}</Badge>
+                ))}
+              </div>
+            )}
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function TimelineItem({ communication, terms }: { communication: Communication; terms: string[] }) {
   return (
     <article className="ui-card v-stack gap-3">
@@ -793,6 +876,22 @@ function CpfStatusBadge({ status }: { status: string }) {
         ? "border-red-200 bg-red-50 text-danger"
         : "border-amber-200 bg-amber-50 text-warning";
   return <span className={cn("rounded-md border px-2 py-1 text-xs font-semibold", style)}>{cpfLabel(status)}</span>;
+}
+
+function DataJudStatusBadge({ status }: { status: string }) {
+  const style =
+    status === "synced"
+      ? "border-emerald-200 bg-emerald-50 text-success"
+      : status === "error"
+        ? "border-red-200 bg-red-50 text-danger"
+        : status === "not_found"
+          ? "border-amber-200 bg-amber-50 text-warning"
+          : "border-neutral-200 bg-neutral-50 text-neutral-600";
+  return (
+    <span className={cn("rounded-md border px-2 py-1 text-xs font-semibold", style)}>
+      {datajudLabel(status)}
+    </span>
+  );
 }
 
 function LoadingState({ label }: { label: string }) {
@@ -876,6 +975,19 @@ function cpfLabel(status: string): string {
   return "CPF ausente";
 }
 
+function datajudLabel(status: string): string {
+  if (status === "synced") {
+    return "DataJud ok";
+  }
+  if (status === "not_found") {
+    return "Nao encontrado";
+  }
+  if (status === "error") {
+    return "Erro DataJud";
+  }
+  return "Pendente";
+}
+
 function statusLabel(status: string): string {
   if (status === "queued") {
     return "Na fila";
@@ -898,6 +1010,15 @@ function formatDate(value: string | null | undefined): string {
   }
   const [year, month, day] = value.slice(0, 10).split("-");
   return day && month && year ? `${day}/${month}/${year}` : value;
+}
+
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) {
+    return "Ausente";
+  }
+  const date = formatDate(value);
+  const time = value.length >= 16 ? value.slice(11, 16) : "";
+  return time ? `${date} ${time}` : date;
 }
 
 function escapeRegExp(value: string): string {

@@ -69,6 +69,9 @@ class ProcessListItem(BaseModel):
     polo: str | None
     communications_count: int
     last_movement_at: date | None
+    datajud_status: str
+    datajud_synced_at: datetime | None
+    datajud_last_movement_at: datetime | None
 
 
 class PartyRead(BaseModel):
@@ -110,7 +113,33 @@ class CommunicationRead(CommunicationListItem):
     lawyers: list[LawyerRead]
 
 
+class DataJudMovementRead(BaseModel):
+    codigo: int | None
+    nome: str | None
+    data_hora: datetime | None
+    orgao_julgador: str | None
+    complementos: list[str]
+
+
+class DataJudRead(BaseModel):
+    status: str
+    alias: str | None
+    synced_at: datetime | None
+    source_updated_at: datetime | None
+    filed_at: datetime | None
+    last_movement_at: datetime | None
+    degree: str | None
+    secrecy_level: int | None
+    system: str | None
+    format: str | None
+    subjects: list[str]
+    movements_count: int
+    error: str | None
+    movements: list[DataJudMovementRead]
+
+
 class ProcessDetail(ProcessListItem):
+    datajud: DataJudRead
     parties: list[PartyRead]
     lawyers: list[LawyerRead]
     timeline: list[CommunicationListItem]

@@ -9,6 +9,17 @@ from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
+from app.datajud import (
+    DATAJUD_STATUS_ERROR,
+    DATAJUD_STATUS_NOT_FOUND,
+    DATAJUD_STATUS_PENDING,
+    DATAJUD_STATUS_SYNCED,
+    DataJudClient,
+    DataJudSearchResult,
+    datajud_object_name,
+    latest_datajud_movement_datetime,
+    parse_datajud_datetime,
+)
 from app.djen import DjenClient, DjenPage, DjenRateLimitError
 from app.models import (
     Client,
@@ -72,18 +83,27 @@ class DjenImporter:
         self,
         session: AsyncSession,
         djen_client: DjenClient,
+        datajud_client: DataJudClient | None = None,
         *,
         sleep: SleepFunc = asyncio.sleep,
         rate_limit_sleep_seconds: int | None = None,
+        datajud_refresh_hours: int | None = None,
     ) -> None:
         self.session = session
         self.djen_client = djen_client
+        self.datajud_client = datajud_client
         self.sleep = sleep
         self.rate_limit_sleep_seconds = (
             get_settings().rate_limit_sleep_seconds
             if rate_limit_sleep_seconds is None
             else rate_limit_sleep_seconds
         )
+        self.datajud_refresh_hours = (
+            get_settings().datajud_refresh_hours
+            if datajud_refresh_hours is None
+            else datajud_refresh_hours
+        )
+        self._datajud_checked_process_ids: set[str] = set()
 
     async def process_run(self, run_id: str) -> SearchRun:
         run = await self.session.get(SearchRun, run_id)
@@ -158,6 +178,9 @@ class DjenImporter:
         for item in items:
             communication = await self._find_existing_communication(item)
             if communication:
+                process = await self.session.get(Process, communication.process_id)
+                if process:
+                    await self._maybe_enrich_process_with_datajud(process)
                 continue
             await self._create_communication(client, item)
             imported += 1
@@ -176,9 +199,7 @@ class DjenImporter:
         return result.scalar_one_or_none()
 
     async def _create_communication(self, client: Client, item: dict[str, Any]) -> Communication:
-        process_number = normalize_process_number(
-            _to_str(get_first(item, "numero_processo", "numeroProcesso", "numeroprocessocommascara"))
-        )
+        process_number = self._process_number_from_item(item)
         if not process_number:
             raise ValueError("Comunicacao do DJEN sem numero de processo")
 
@@ -186,6 +207,7 @@ class DjenImporter:
             get_first(item, "data_disponibilizacao", "datadisponibilizacao")
         )
         process = await self._get_or_create_process(item, process_number, movement_date)
+        await self._maybe_enrich_process_with_datajud(process)
 
         raw_text = _to_str(get_first(item, "texto")) or ""
         communication = Communication(
@@ -231,6 +253,7 @@ class DjenImporter:
                 agency=_to_str(get_first(item, "nomeOrgao", "orgao")),
                 external_link=_to_str(get_first(item, "link")),
                 last_communication_at=movement_date,
+                datajud_status=DATAJUD_STATUS_PENDING,
             )
             self.session.add(process)
             await self.session.flush()
@@ -345,11 +368,85 @@ class DjenImporter:
             client_process.last_movement_at = movement_date
         return client_process
 
+    def _process_number_from_item(self, item: dict[str, Any]) -> str:
+        raw_process_number = _to_str(
+            get_first(item, "numero_processo", "numeroProcesso", "numeroprocessocommascara")
+        )
+        return normalize_process_number(raw_process_number)
+
+    async def _maybe_enrich_process_with_datajud(self, process: Process) -> None:
+        if not self.datajud_client or not self._should_refresh_datajud(process):
+            return
+        if process.id in self._datajud_checked_process_ids:
+            return
+        self._datajud_checked_process_ids.add(process.id)
+
+        try:
+            result = await self.datajud_client.fetch_process(
+                process.numero_processo,
+                tribunal=process.tribunal,
+            )
+        except Exception as exc:
+            self._record_datajud_error(process, exc)
+            await self.session.flush()
+            return
+
+        self._apply_datajud_result(process, result)
+        await self.session.flush()
+
+    def _should_refresh_datajud(self, process: Process) -> bool:
+        if process.datajud_status == DATAJUD_STATUS_PENDING or process.datajud_synced_at is None:
+            return True
+        if self.datajud_refresh_hours <= 0:
+            return True
+        synced_at = process.datajud_synced_at
+        if synced_at.tzinfo is None:
+            synced_at = synced_at.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - synced_at >= timedelta(hours=self.datajud_refresh_hours)
+
+    def _apply_datajud_result(self, process: Process, result: DataJudSearchResult) -> None:
+        process.datajud_alias = result.alias
+        process.datajud_synced_at = datetime.now(timezone.utc)
+        process.datajud_error = None
+
+        source = result.source
+        if not source:
+            process.datajud_status = DATAJUD_STATUS_NOT_FOUND
+            process.datajud_payload = None
+            process.datajud_subjects = []
+            process.datajud_movements_count = 0
+            return
+
+        process.datajud_status = DATAJUD_STATUS_SYNCED
+        process.datajud_payload = source
+        process.tribunal = _to_str(source.get("tribunal")) or process.tribunal
+        process.process_class = datajud_object_name(source.get("classe")) or process.process_class
+        process.agency = datajud_object_name(source.get("orgaoJulgador")) or process.agency
+        process.datajud_source_updated_at = parse_datajud_datetime(
+            source.get("dataHoraUltimaAtualizacao")
+        )
+        process.datajud_last_movement_at = latest_datajud_movement_datetime(source)
+        process.datajud_filed_at = parse_datajud_datetime(source.get("dataAjuizamento"))
+        process.datajud_degree = _to_str(source.get("grau"))
+        process.datajud_secrecy_level = _to_int(source.get("nivelSigilo"))
+        process.datajud_system = datajud_object_name(source.get("sistema"))
+        process.datajud_format = datajud_object_name(source.get("formato"))
+        subjects = source.get("assuntos")
+        process.datajud_subjects = subjects if isinstance(subjects, list) else []
+        movements = source.get("movimentos")
+        process.datajud_movements_count = len(movements) if isinstance(movements, list) else 0
+
+    def _record_datajud_error(self, process: Process, exc: Exception) -> None:
+        process.datajud_status = DATAJUD_STATUS_ERROR
+        process.datajud_synced_at = datetime.now(timezone.utc)
+        process.datajud_error = _sanitize_datajud_error(exc)
+
 
 async def process_next_queued_run(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     djen_client: DjenClient | None = None,
+    datajud_client: DataJudClient | None = None,
     sleep: SleepFunc = asyncio.sleep,
 ) -> bool:
     async with session_factory() as session:
@@ -357,8 +454,16 @@ async def process_next_queued_run(
         run = result.scalar_one_or_none()
         if run is None:
             return False
-        client = djen_client or DjenClient(get_settings().djen_base_url)
-        importer = DjenImporter(session, client, sleep=sleep)
+        settings = get_settings()
+        client = djen_client or DjenClient(settings.djen_base_url)
+        datajud = datajud_client
+        if datajud is None and settings.datajud_api_key:
+            datajud = DataJudClient(
+                settings.datajud_base_url,
+                settings.datajud_api_key,
+                timeout=settings.datajud_timeout_seconds,
+            )
+        importer = DjenImporter(session, client, datajud_client=datajud, sleep=sleep)
         await importer.process_run(run.id)
         return True
 
@@ -386,3 +491,8 @@ def _to_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _sanitize_datajud_error(exc: Exception) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    return message[:512]

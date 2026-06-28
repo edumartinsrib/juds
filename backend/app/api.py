@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime
 from io import BytesIO, StringIO
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db import get_session
+from app.datajud import datajud_movements, datajud_subject_names
 from app.importer import enqueue_search_run
 from app.models import (
     Client,
@@ -27,6 +29,8 @@ from app.schemas import (
     ClientRead,
     CommunicationListItem,
     CommunicationRead,
+    DataJudMovementRead,
+    DataJudRead,
     LawyerRead,
     PartyRead,
     ProcessDetail,
@@ -132,6 +136,7 @@ async def get_process(process_id: str, session: AsyncSession = Depends(get_sessi
     base = _process_item(process, client_process)
     return ProcessDetail(
         **base.model_dump(),
+        datajud=_datajud_read(process),
         parties=[_party_read(party) for party in parties],
         lawyers=[_lawyer_read(lawyer) for lawyer in lawyers.values()],
         timeline=[_communication_item(communication) for communication in timeline],
@@ -247,6 +252,42 @@ def _process_item(process: Process, client_process: ClientProcess | None) -> Pro
         polo=client_process.polo if client_process else None,
         communications_count=client_process.communications_count if client_process else 0,
         last_movement_at=client_process.last_movement_at if client_process else process.last_communication_at,
+        datajud_status=process.datajud_status or "pending",
+        datajud_synced_at=process.datajud_synced_at,
+        datajud_last_movement_at=process.datajud_last_movement_at,
+    )
+
+
+def _datajud_read(process: Process) -> DataJudRead:
+    movements = [
+        DataJudMovementRead(
+            codigo=_to_int(movement.get("codigo")),
+            nome=_to_str(movement.get("nome")),
+            data_hora=movement.get("data_hora"),
+            orgao_julgador=_to_str(movement.get("orgao_julgador")),
+            complementos=[
+                complement
+                for complement in movement.get("complementos", [])
+                if isinstance(complement, str)
+            ],
+        )
+        for movement in datajud_movements(process.datajud_payload)
+    ]
+    return DataJudRead(
+        status=process.datajud_status or "pending",
+        alias=process.datajud_alias,
+        synced_at=process.datajud_synced_at,
+        source_updated_at=process.datajud_source_updated_at,
+        filed_at=process.datajud_filed_at,
+        last_movement_at=process.datajud_last_movement_at,
+        degree=process.datajud_degree,
+        secrecy_level=process.datajud_secrecy_level,
+        system=process.datajud_system,
+        format=process.datajud_format,
+        subjects=datajud_subject_names(process.datajud_payload),
+        movements_count=process.datajud_movements_count or 0,
+        error=process.datajud_error,
+        movements=movements,
     )
 
 
@@ -307,6 +348,20 @@ async def _export_rows(session: AsyncSession, client_id: str) -> list[dict[str, 
                 "tipo_comunicacao": communication.tipo_comunicacao or "",
                 "cpf_status": client_process.cpf_status,
                 "polo": client_process.polo or "",
+                "datajud_status": process.datajud_status or "pending",
+                "datajud_ajuizamento": _datetime_to_text(process.datajud_filed_at),
+                "datajud_ultima_atualizacao": _datetime_to_text(
+                    process.datajud_source_updated_at
+                ),
+                "datajud_ultima_movimentacao": _datetime_to_text(
+                    process.datajud_last_movement_at
+                ),
+                "datajud_grau": process.datajud_degree or "",
+                "datajud_sistema": process.datajud_system or "",
+                "datajud_formato": process.datajud_format or "",
+                "datajud_sigilo": _optional_int_to_text(process.datajud_secrecy_level),
+                "datajud_assuntos": "; ".join(datajud_subject_names(process.datajud_payload)),
+                "datajud_movimentos_count": str(process.datajud_movements_count or 0),
                 "link": communication.external_link or "",
                 "texto": communication.plain_text,
             }
@@ -325,6 +380,16 @@ def _export_csv(rows: list[dict[str, str]]) -> str:
         "tipo_comunicacao",
         "cpf_status",
         "polo",
+        "datajud_status",
+        "datajud_ajuizamento",
+        "datajud_ultima_atualizacao",
+        "datajud_ultima_movimentacao",
+        "datajud_grau",
+        "datajud_sistema",
+        "datajud_formato",
+        "datajud_sigilo",
+        "datajud_assuntos",
+        "datajud_movimentos_count",
         "link",
         "texto",
     ]
@@ -347,6 +412,16 @@ def _export_xlsx(rows: list[dict[str, str]]) -> bytes:
         "tipo_comunicacao",
         "cpf_status",
         "polo",
+        "datajud_status",
+        "datajud_ajuizamento",
+        "datajud_ultima_atualizacao",
+        "datajud_ultima_movimentacao",
+        "datajud_grau",
+        "datajud_sistema",
+        "datajud_formato",
+        "datajud_sigilo",
+        "datajud_assuntos",
+        "datajud_movimentos_count",
         "link",
         "texto",
     ]
@@ -356,3 +431,27 @@ def _export_xlsx(rows: list[dict[str, str]]) -> bytes:
     stream = BytesIO()
     workbook.save(stream)
     return stream.getvalue()
+
+
+def _datetime_to_text(value: datetime | None) -> str:
+    return value.isoformat() if value else ""
+
+
+def _optional_int_to_text(value: int | None) -> str:
+    return "" if value is None else str(value)
+
+
+def _to_str(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _to_int(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

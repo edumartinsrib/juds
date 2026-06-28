@@ -2,9 +2,10 @@ from datetime import date
 
 from sqlalchemy import func, select
 
+from app.datajud import DATAJUD_STATUS_ERROR, DATAJUD_STATUS_SYNCED, DataJudSearchResult
 from app.djen import DjenPage, DjenRateLimitError
 from app.importer import DjenImporter
-from app.models import Client, ClientProcess, Communication, CommunicationParty, SearchRun
+from app.models import Client, ClientProcess, Communication, CommunicationParty, Process, SearchRun
 from app.utils import (
     CPF_STATUS_ABSENT,
     CPF_STATUS_DIVERGENT,
@@ -12,6 +13,7 @@ from app.utils import (
     normalize_cpf,
     normalize_name,
 )
+from tests.test_datajud import datajud_source
 
 
 class FakeDjenClient:
@@ -21,6 +23,19 @@ class FakeDjenClient:
 
     async def fetch_comunicacoes(self, **kwargs):
         self.calls.append(kwargs)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class FakeDataJudClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def fetch_process(self, numero_processo, tribunal=None):
+        self.calls.append({"numero_processo": numero_processo, "tribunal": tribunal})
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -175,3 +190,71 @@ async def test_importer_classifies_absent_and_divergent_cpf(session) -> None:
     statuses = (await session.execute(select(ClientProcess.cpf_status))).scalars().all()
     assert CPF_STATUS_ABSENT in statuses
     assert CPF_STATUS_DIVERGENT in statuses
+
+
+async def test_importer_enriches_process_with_datajud_once_per_run(session) -> None:
+    client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    session.add(client)
+    await session.flush()
+
+    datajud = datajud_source()
+    fake_datajud = FakeDataJudClient(
+        [
+            DataJudSearchResult(alias="tjsp", source=datajud, total=1),
+        ]
+    )
+    importer = DjenImporter(
+        session,
+        FakeDjenClient([]),
+        datajud_client=fake_datajud,
+        sleep=noop_sleep,
+        rate_limit_sleep_seconds=0,
+    )
+
+    await importer.import_items(
+        client,
+        [
+            djen_item(301),
+            djen_item(302),
+        ],
+    )
+    await session.commit()
+
+    process = (await session.execute(select(Process))).scalar_one()
+    assert len(fake_datajud.calls) == 1
+    assert fake_datajud.calls[0]["numero_processo"] == "00012345620248260100"
+    assert fake_datajud.calls[0]["tribunal"] == "TJSP"
+    assert process.datajud_status == DATAJUD_STATUS_SYNCED
+    assert process.datajud_alias == "tjsp"
+    assert process.process_class == "Procedimento DataJud"
+    assert process.agency == "2 Vara Civel"
+    assert process.datajud_system == "PJe"
+    assert process.datajud_movements_count == 2
+
+
+async def test_importer_records_datajud_error_without_failing_djen_import(session) -> None:
+    client = Client(name="Joao da Silva", normalized_name=normalize_name("Joao da Silva"), cpf=None)
+    session.add(client)
+    await session.flush()
+
+    fake_datajud = FakeDataJudClient([RuntimeError("DataJud indisponivel")])
+    importer = DjenImporter(
+        session,
+        FakeDjenClient([]),
+        datajud_client=fake_datajud,
+        sleep=noop_sleep,
+        rate_limit_sleep_seconds=0,
+    )
+
+    imported = await importer.import_items(client, [djen_item(401)])
+    await session.commit()
+
+    process = (await session.execute(select(Process))).scalar_one()
+    assert imported == 1
+    assert await session.scalar(select(func.count(Communication.id))) == 1
+    assert process.datajud_status == DATAJUD_STATUS_ERROR
+    assert process.datajud_error == "DataJud indisponivel"
