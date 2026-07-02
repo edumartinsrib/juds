@@ -11,8 +11,10 @@ from app.models import (
     Communication,
     CommunicationLawyer,
     CommunicationParty,
+    CommunicationRiskMatch,
     Lawyer,
     Process,
+    RiskKeyword,
     SearchRun,
 )
 from app.utils import (
@@ -285,6 +287,37 @@ async def test_importer_classifies_absent_and_divergent_cpf(session) -> None:
     statuses = (await session.execute(select(ClientProcess.cpf_status))).scalars().all()
     assert CPF_STATUS_ABSENT in statuses
     assert CPF_STATUS_DIVERGENT in statuses
+
+
+async def test_importer_classifies_new_communication_with_active_risk_keyword(session) -> None:
+    client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    keyword = RiskKeyword(
+        term="SISBAJUD",
+        normalized_term=normalize_name("SISBAJUD"),
+        category="Bloqueio judicial",
+        risk_level="alto",
+        active=True,
+    )
+    session.add_all([client, keyword])
+    await session.flush()
+
+    item = djen_item(250)
+    item["texto"] = "<p>Decisao determina pesquisa SISBAJUD em nome da parte executada.</p>"
+    importer = DjenImporter(session, FakeDjenClient([]), sleep=noop_sleep, rate_limit_sleep_seconds=0)
+
+    imported = await importer.import_items(client, [item])
+    await session.commit()
+
+    assert imported == 1
+    match = (await session.execute(select(CommunicationRiskMatch))).scalar_one()
+    assert match.risk_keyword_id == keyword.id
+    assert match.source == "texto"
+    assert match.matched_text == "SISBAJUD"
+    assert "pesquisa SISBAJUD" in match.excerpt
 
 
 async def test_importer_enriches_process_with_datajud_once_per_run(session) -> None:

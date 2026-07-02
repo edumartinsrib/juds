@@ -33,6 +33,7 @@ from app.models import (
     Process,
     SearchRun,
 )
+from app.risk import classify_communication_risk
 from app.utils import (
     CPF_STATUS_ABSENT,
     classify_party_cpf,
@@ -423,6 +424,7 @@ class DjenImporter:
         await self._create_lawyers(communication, item)
         await self._upsert_client_process(client, process, movement_date, cpf_status, polo)
         await self.session.flush()
+        await classify_communication_risk(self.session, communication.id)
         return communication
 
     async def _get_or_create_process(

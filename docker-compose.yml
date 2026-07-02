@@ -43,9 +43,7 @@ services:
         condition: service_healthy
       api:
         condition: service_started
-    command: >
-      sh -c "alembic upgrade head &&
-             python -m app.worker"
+    command: python -m app.worker
 
   frontend:
     build:

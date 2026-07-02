@@ -16,7 +16,8 @@
 
   button,
   input,
-  select {
+  select,
+  textarea {
     font: inherit;
   }
 }
@@ -35,7 +36,7 @@
   }
 
   .ui-button {
-    @apply min-h-10 rounded-md border border-line bg-white px-3 py-2 text-sm font-semibold text-ink shadow-subtle transition hover:border-brand-500 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply min-h-10 rounded-md border border-line bg-white px-3 py-2 text-sm font-semibold text-ink shadow-subtle transition hover:border-brand-500 hover:text-brand-700 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0;
   }
 
   .ui-button-primary {

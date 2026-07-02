@@ -4,6 +4,10 @@ import type {
   ProcessEnrichment,
   ProcessDetail,
   ProcessListItem,
+  RiskKeyword,
+  RiskKeywordMutation,
+  RiskKeywordPayload,
+  RiskReprocess,
   SearchRun,
 } from "./types";
 
@@ -70,6 +74,39 @@ export function enrichProcess(
 
 export function getCommunication(communicationId: string): Promise<CommunicationDetail> {
   return request<CommunicationDetail>(`/api/communications/${communicationId}`);
+}
+
+export function listRiskKeywords(): Promise<RiskKeyword[]> {
+  return request<RiskKeyword[]>("/api/risk-keywords");
+}
+
+export function createRiskKeyword(payload: RiskKeywordPayload): Promise<RiskKeywordMutation> {
+  return request<RiskKeywordMutation>("/api/risk-keywords", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateRiskKeyword(
+  keywordId: string,
+  payload: Partial<RiskKeywordPayload>,
+): Promise<RiskKeywordMutation> {
+  return request<RiskKeywordMutation>(`/api/risk-keywords/${keywordId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteRiskKeyword(keywordId: string): Promise<RiskKeywordMutation> {
+  return request<RiskKeywordMutation>(`/api/risk-keywords/${keywordId}`, {
+    method: "DELETE",
+  });
+}
+
+export function reprocessRiskKeywords(): Promise<RiskReprocess> {
+  return request<RiskReprocess>("/api/risk-keywords/reprocess", {
+    method: "POST",
+  });
 }
 
 export function exportUrl(clientId: string, format: "csv" | "xlsx"): string {

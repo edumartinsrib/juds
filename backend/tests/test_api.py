@@ -135,3 +135,68 @@ async def test_client_search_run_and_export_flow(session) -> None:
         )
         assert xlsx_response.status_code == 200
         assert xlsx_response.content[:2] == b"PK"
+
+
+async def test_risk_keyword_crud_reprocesses_existing_communications(session) -> None:
+    async with api_client() as client:
+        create_response = await client.post("/api/clients", json={"name": "Joao da Silva"})
+        assert create_response.status_code == 201
+        created = create_response.json()
+
+    db_client = await session.get(Client, created["id"])
+    item = djen_item(880)
+    item["texto"] = "<p>Decisao cita SISBAJUD e Banco do Brasil como pontos de atencao.</p>"
+    importer = DjenImporter(session, FakeDjenClient([]), sleep=noop_sleep, rate_limit_sleep_seconds=0)
+    await importer.import_items(db_client, [item])
+    await session.commit()
+
+    async with api_client() as client:
+        create_keyword = await client.post(
+            "/api/risk-keywords",
+            json={
+                "term": "sisbajud",
+                "category": "Bloqueio judicial",
+                "risk_level": "alto",
+                "active": True,
+            },
+        )
+        assert create_keyword.status_code == 201
+        created_keyword = create_keyword.json()
+        assert created_keyword["reprocess"]["scanned_communications"] == 1
+        assert created_keyword["reprocess"]["matched_communications"] == 1
+        assert created_keyword["keyword"]["match_count"] == 1
+
+        processes = (
+            await client.get("/api/processes", params={"client_id": created["id"]})
+        ).json()
+        assert processes[0]["risk_matches_count"] == 1
+        assert processes[0]["highest_risk_level"] == "alto"
+        assert processes[0]["risk_matches"][0]["keyword"] == "sisbajud"
+
+        communication_id = (
+            await session.execute(select(Communication.id).order_by(Communication.djen_id.asc()))
+        ).scalars().first()
+        communication_response = await client.get(f"/api/communications/{communication_id}")
+        assert communication_response.status_code == 200
+        assert communication_response.json()["risk_matches"][0]["source"] == "texto"
+
+        update_keyword = await client.patch(
+            f"/api/risk-keywords/{created_keyword['keyword']['id']}",
+            json={
+                "term": "Banco do Brasil",
+                "category": "Instituicao financeira",
+                "risk_level": "medio",
+                "active": True,
+            },
+        )
+        assert update_keyword.status_code == 200
+        assert update_keyword.json()["keyword"]["match_count"] == 1
+
+        delete_keyword = await client.delete(f"/api/risk-keywords/{created_keyword['keyword']['id']}")
+        assert delete_keyword.status_code == 200
+        assert delete_keyword.json()["reprocess"]["matches_created"] == 0
+        processes_after_delete = (
+            await client.get("/api/processes", params={"client_id": created["id"]})
+        ).json()
+        assert processes_after_delete[0]["risk_matches_count"] == 0
+        assert processes_after_delete[0]["highest_risk_level"] is None

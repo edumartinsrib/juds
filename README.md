@@ -9,6 +9,7 @@ Consulta local de comunicações do DJEN por pessoa com enriquecimento DataJud p
 - Persistência de clientes, execuções de busca, processos, comunicações, partes e advogados.
 - Persistência de capa, classe, órgão, assuntos, grau, sistema, sigilo e movimentos DataJud no processo.
 - Enriquecimento processo a processo por número exato, combinando refresh DataJud com busca retroativa no DJEN.
+- Gestão de palavras-chave de risco com severidade, categoria, evidência por trecho e reprocessamento das comunicações já importadas.
 - CPF é normalizado no backend, mascarado na interface e nunca inferido quando o DJEN não o informa.
 - Texto HTML/XML do DJEN é convertido para texto seguro e o conteúdo bruto é preservado para auditoria.
 - Exportação em CSV e XLSX.
@@ -59,4 +60,9 @@ npm run build
 - `GET /api/processes/{id}`
 - `POST /api/processes/{id}/enrich`
 - `GET /api/communications/{id}`
+- `GET /api/risk-keywords`
+- `POST /api/risk-keywords`
+- `PATCH /api/risk-keywords/{id}`
+- `DELETE /api/risk-keywords/{id}`
+- `POST /api/risk-keywords/reprocess`
 - `GET /api/exports?client_id=...&format=csv|xlsx`

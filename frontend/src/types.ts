@@ -39,6 +39,9 @@ export type ProcessListItem = {
   datajud_synced_at: string | null;
   datajud_last_movement_at: string | null;
   process_parties: ProcessParty[];
+  risk_matches_count: number;
+  highest_risk_level: RiskLevel | null;
+  risk_matches: RiskMatch[];
 };
 
 export type ProcessParty = {
@@ -74,6 +77,7 @@ export type Communication = {
   meio: string | null;
   external_link: string | null;
   plain_text: string;
+  risk_matches: RiskMatch[];
 };
 
 export type CommunicationDetail = Communication & {
@@ -126,4 +130,50 @@ export type ProcessEnrichment = {
   djen_pages: number;
   rate_limit_limit: number | null;
   rate_limit_remaining: number | null;
+};
+
+export type RiskLevel = "baixo" | "medio" | "alto" | "critico";
+
+export type RiskKeyword = {
+  id: string;
+  term: string;
+  normalized_term: string;
+  category: string;
+  risk_level: RiskLevel;
+  description: string | null;
+  active: boolean;
+  match_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RiskKeywordPayload = {
+  term: string;
+  category: string;
+  risk_level: RiskLevel;
+  description?: string | null;
+  active: boolean;
+};
+
+export type RiskReprocess = {
+  scanned_communications: number;
+  matched_communications: number;
+  matches_created: number;
+};
+
+export type RiskKeywordMutation = {
+  keyword: RiskKeyword | null;
+  reprocess: RiskReprocess;
+};
+
+export type RiskMatch = {
+  id: string;
+  keyword_id: string;
+  keyword: string;
+  category: string;
+  risk_level: RiskLevel;
+  source: string;
+  matched_text: string;
+  excerpt: string;
+  created_at: string;
 };

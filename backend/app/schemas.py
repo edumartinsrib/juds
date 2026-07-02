@@ -5,6 +5,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, Field, field_validator
 
 from app.utils import mask_cpf, normalize_cpf
+from app.risk import validate_risk_level
 
 
 class ClientCreate(BaseModel):
@@ -57,6 +58,102 @@ class SearchRunRead(BaseModel):
     finished_at: datetime | None
 
 
+class RiskKeywordCreate(BaseModel):
+    term: str = Field(min_length=2, max_length=255)
+    category: str = Field(default="Geral", min_length=2, max_length=80)
+    risk_level: str = Field(default="medio")
+    description: str | None = Field(default=None, max_length=1000)
+    active: bool = True
+
+    @field_validator("term", "category")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        text = " ".join(value.strip().split())
+        if len(text) < 2:
+            raise ValueError("Campo deve ter pelo menos 2 caracteres")
+        return text
+
+    @field_validator("risk_level")
+    @classmethod
+    def normalize_level(cls, value: str) -> str:
+        return validate_risk_level(value)
+
+    @field_validator("description")
+    @classmethod
+    def strip_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
+
+
+class RiskKeywordUpdate(BaseModel):
+    term: str | None = Field(default=None, min_length=2, max_length=255)
+    category: str | None = Field(default=None, min_length=2, max_length=80)
+    risk_level: str | None = None
+    description: str | None = Field(default=None, max_length=1000)
+    active: bool | None = None
+
+    @field_validator("term", "category")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = " ".join(value.strip().split())
+        if len(text) < 2:
+            raise ValueError("Campo deve ter pelo menos 2 caracteres")
+        return text
+
+    @field_validator("risk_level")
+    @classmethod
+    def normalize_optional_level(cls, value: str | None) -> str | None:
+        return validate_risk_level(value) if value is not None else None
+
+    @field_validator("description")
+    @classmethod
+    def strip_optional_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
+
+
+class RiskKeywordRead(BaseModel):
+    id: str
+    term: str
+    normalized_term: str
+    category: str
+    risk_level: str
+    description: str | None
+    active: bool
+    match_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class RiskReprocessRead(BaseModel):
+    scanned_communications: int
+    matched_communications: int
+    matches_created: int
+
+
+class RiskKeywordMutationRead(BaseModel):
+    keyword: RiskKeywordRead | None
+    reprocess: RiskReprocessRead
+
+
+class RiskMatchRead(BaseModel):
+    id: str
+    keyword_id: str
+    keyword: str
+    category: str
+    risk_level: str
+    source: str
+    matched_text: str
+    excerpt: str
+    created_at: datetime
+
+
 class ProcessEnrichmentCreate(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
@@ -85,6 +182,9 @@ class ProcessListItem(BaseModel):
     datajud_synced_at: datetime | None
     datajud_last_movement_at: datetime | None
     process_parties: list[ProcessPartyRead]
+    risk_matches_count: int
+    highest_risk_level: str | None
+    risk_matches: list[RiskMatchRead]
 
 
 class PartyRead(BaseModel):
@@ -116,6 +216,7 @@ class CommunicationListItem(BaseModel):
     meio: str | None
     external_link: str | None
     plain_text: str
+    risk_matches: list[RiskMatchRead]
 
 
 class CommunicationRead(CommunicationListItem):

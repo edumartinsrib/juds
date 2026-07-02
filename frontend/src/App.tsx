@@ -15,8 +15,15 @@ import {
   Gavel,
   ListFilter,
   Loader2,
+  Plus,
   RefreshCw,
+  RotateCw,
+  Save,
   Search,
+  ShieldAlert,
+  ShieldCheck,
+  Tags,
+  Trash2,
   Users,
 } from "lucide-react";
 import {
@@ -28,13 +35,18 @@ import {
 
 import {
   createClient,
+  createRiskKeyword,
   createSearchRun,
+  deleteRiskKeyword,
   enrichProcess,
   exportUrl,
   getProcess,
   getSearchRun,
   listClients,
   listProcesses,
+  listRiskKeywords,
+  reprocessRiskKeywords,
+  updateRiskKeyword,
 } from "./api";
 import { cn } from "./lib/cn";
 import type {
@@ -44,6 +56,11 @@ import type {
   ProcessEnrichment,
   ProcessListItem,
   ProcessParty,
+  RiskKeyword,
+  RiskKeywordPayload,
+  RiskLevel,
+  RiskMatch,
+  RiskReprocess,
   SearchRun,
 } from "./types";
 
@@ -51,7 +68,15 @@ const navItems = [
   { to: "/", label: "Clientes", icon: Users },
   { to: "/processos", label: "Processos", icon: BriefcaseBusiness },
   { to: "/movimentacoes", label: "Movimentacoes", icon: Gavel },
+  { to: "/riscos", label: "Riscos", icon: ShieldAlert },
   { to: "/exportacoes", label: "Exportacoes", icon: FileDown },
+];
+
+const riskLevelOptions: Array<{ value: RiskLevel; label: string }> = [
+  { value: "baixo", label: "Baixo" },
+  { value: "medio", label: "Medio" },
+  { value: "alto", label: "Alto" },
+  { value: "critico", label: "Critico" },
 ];
 
 export default function App() {
@@ -97,7 +122,7 @@ export default function App() {
   return (
     <main className="min-h-screen bg-paper text-ink">
       <div className="mx-auto grid min-h-screen max-w-7xl grid-rows-[auto_1fr] px-4 py-4 lg:px-6">
-        <header className="h-stack flex-wrap items-center gap-3 border-b border-line pb-4">
+        <header className="v-stack min-w-0 gap-3 border-b border-line pb-4 lg:h-stack lg:flex-wrap lg:items-center">
           <div className="h-stack min-w-0 items-center gap-3">
             <div className="center h-10 w-10 shrink-0 rounded-md bg-ink text-white">
               <Gavel size={21} aria-hidden="true" />
@@ -109,8 +134,8 @@ export default function App() {
               </p>
             </div>
           </div>
-          <div className="spacer" />
-          <nav className="h-stack w-full gap-2 overflow-x-auto lg:w-auto" aria-label="Principal">
+          <div className="hidden lg:block lg:spacer" />
+          <nav className="h-stack min-w-0 max-w-full flex-wrap gap-2 pb-1 lg:w-auto" aria-label="Principal">
             {navItems.map((item) => (
               <NavLink
                 key={item.to}
@@ -166,6 +191,7 @@ export default function App() {
               />
             }
           />
+          <Route path="/riscos" element={<RiskManagementView />} />
           <Route
             path="/exportacoes"
             element={
@@ -324,11 +350,25 @@ function ProcessesView({
   onSelectProcess: (processId: string) => void;
 }) {
   const navigate = useNavigate();
+  const [riskFilter, setRiskFilter] = useState("todos");
   const processesQuery = useQuery({
     queryKey: ["processes", selectedClientId],
     queryFn: () => listProcesses(selectedClientId),
     enabled: Boolean(selectedClientId),
   });
+  const filteredProcesses = useMemo(() => {
+    const processes = processesQuery.data ?? [];
+    if (riskFilter === "todos") {
+      return processes;
+    }
+    if (riskFilter === "com_risco") {
+      return processes.filter((process) => process.risk_matches_count > 0);
+    }
+    if (riskFilter === "sem_risco") {
+      return processes.filter((process) => process.risk_matches_count === 0);
+    }
+    return processes.filter((process) => process.highest_risk_level === riskFilter);
+  }, [processesQuery.data, riskFilter]);
 
   const columns = useMemo<ColumnDef<ProcessListItem>[]>(
     () => [
@@ -346,6 +386,11 @@ function ProcessesView({
         header: "Partes",
         accessorKey: "process_parties",
         cell: ({ row }) => <ProcessParties parties={row.original.process_parties} compact />,
+      },
+      {
+        header: "Risco",
+        accessorKey: "highest_risk_level",
+        cell: ({ row }) => <ProcessRiskSummary process={row.original} compact />,
       },
       {
         header: "Tribunal",
@@ -391,7 +436,7 @@ function ProcessesView({
   );
 
   const table = useReactTable({
-    data: processesQuery.data ?? [],
+    data: filteredProcesses,
     columns,
     getCoreRowModel: getCoreRowModel(),
   });
@@ -418,6 +463,18 @@ function ProcessesView({
             />
             Atualizar
           </button>
+          <label className="v-stack min-w-[220px] gap-1 text-sm font-medium">
+            Filtro de risco
+            <select className="ui-input" value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>
+              <option value="todos">Todos</option>
+              <option value="com_risco">Com risco</option>
+              <option value="critico">Critico</option>
+              <option value="alto">Alto</option>
+              <option value="medio">Medio</option>
+              <option value="baixo">Baixo</option>
+              <option value="sem_risco">Sem risco</option>
+            </select>
+          </label>
         </div>
       </Panel>
 
@@ -426,7 +483,7 @@ function ProcessesView({
           <LoadingState label="Carregando processos" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1040px] border-separate border-spacing-0 text-left text-sm">
+            <table className="w-full min-w-[1160px] border-separate border-spacing-0 text-left text-sm">
               <thead>
                 {table.getHeaderGroups().map((headerGroup) => (
                   <tr key={headerGroup.id}>
@@ -455,7 +512,7 @@ function ProcessesView({
                 ))}
               </tbody>
             </table>
-            {(processesQuery.data ?? []).length === 0 && (
+            {filteredProcesses.length === 0 && (
               <EmptyState label="Nenhum processo importado para o cliente selecionado." />
             )}
           </div>
@@ -478,6 +535,7 @@ function MovementsView({
   const [typeFilter, setTypeFilter] = useState("");
   const [tribunalFilter, setTribunalFilter] = useState("");
   const [dateFilter, setDateFilter] = useState("");
+  const [riskFilter, setRiskFilter] = useState("todos");
   const [enrichmentStartDate, setEnrichmentStartDate] = useState("");
   const [enrichmentEndDate, setEnrichmentEndDate] = useState("");
   const [lastEnrichment, setLastEnrichment] = useState<ProcessEnrichment | null>(null);
@@ -529,9 +587,14 @@ function MovementsView({
       const byType = !typeFilter || communication.tipo_comunicacao === typeFilter;
       const byTribunal = !tribunalFilter || communication.sigla_tribunal === tribunalFilter;
       const byDate = !dateFilter || communication.data_disponibilizacao === dateFilter;
-      return byType && byTribunal && byDate;
+      const byRisk =
+        riskFilter === "todos" ||
+        (riskFilter === "com_risco" && communication.risk_matches.length > 0) ||
+        (riskFilter === "sem_risco" && communication.risk_matches.length === 0) ||
+        communication.risk_matches.some((match) => match.risk_level === riskFilter);
+      return byType && byTribunal && byDate && byRisk;
     });
-  }, [dateFilter, detail?.timeline, tribunalFilter, typeFilter]);
+  }, [dateFilter, detail?.timeline, riskFilter, tribunalFilter, typeFilter]);
 
   const typeOptions = uniqueOptions(detail?.timeline.map((item) => item.tipo_comunicacao));
   const tribunalOptions = uniqueOptions(detail?.timeline.map((item) => item.sigla_tribunal));
@@ -556,6 +619,7 @@ function MovementsView({
               <div className="h-stack flex-wrap gap-2">
                 <Badge>{process.tribunal ?? "Tribunal ausente"}</Badge>
                 <DataJudStatusBadge status={process.datajud_status} />
+                <ProcessRiskSummary process={process} compact />
               </div>
             </button>
           ))}
@@ -583,7 +647,7 @@ function MovementsView({
               onEnrich={() => selectedProcessId && enrichMutation.mutate()}
             />
             <DataJudMovements detail={detail} />
-            <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid gap-3 md:grid-cols-4">
               <SelectFilter label="Tipo" value={typeFilter} options={typeOptions} onChange={setTypeFilter} />
               <SelectFilter
                 label="Tribunal"
@@ -592,6 +656,7 @@ function MovementsView({
                 onChange={setTribunalFilter}
               />
               <SelectFilter label="Data" value={dateFilter} options={dateOptions} onChange={setDateFilter} />
+              <RiskFilter value={riskFilter} onChange={setRiskFilter} />
             </div>
             <div className="v-stack gap-3">
               <div className="h-stack flex-wrap items-center gap-2">
@@ -610,6 +675,211 @@ function MovementsView({
           </div>
         ) : (
           <EmptyState label="Selecione um processo para ver a timeline." />
+        )}
+      </Panel>
+    </section>
+  );
+}
+
+function RiskManagementView() {
+  const queryClient = useQueryClient();
+  const [form, setForm] = useState<RiskKeywordPayload>(defaultRiskForm);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<RiskKeywordPayload>(defaultRiskForm);
+  const [lastReprocess, setLastReprocess] = useState<RiskReprocess | null>(null);
+
+  const keywordsQuery = useQuery({ queryKey: ["risk-keywords"], queryFn: listRiskKeywords });
+  const keywords = keywordsQuery.data ?? [];
+  const activeCount = keywords.filter((keyword) => keyword.active).length;
+  const totalMatches = keywords.reduce((total, keyword) => total + keyword.match_count, 0);
+
+  function invalidateRiskData() {
+    queryClient.invalidateQueries({ queryKey: ["risk-keywords"] });
+    queryClient.invalidateQueries({ queryKey: ["processes"] });
+    queryClient.invalidateQueries({ queryKey: ["process"] });
+  }
+
+  const createMutation = useMutation({
+    mutationFn: createRiskKeyword,
+    onSuccess: (result) => {
+      setForm(defaultRiskForm());
+      setLastReprocess(result.reprocess);
+      invalidateRiskData();
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: RiskKeywordPayload }) =>
+      updateRiskKeyword(id, payload),
+    onSuccess: (result) => {
+      setEditingId(null);
+      setLastReprocess(result.reprocess);
+      invalidateRiskData();
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: deleteRiskKeyword,
+    onSuccess: (result) => {
+      setEditingId(null);
+      setLastReprocess(result.reprocess);
+      invalidateRiskData();
+    },
+  });
+
+  const reprocessMutation = useMutation({
+    mutationFn: reprocessRiskKeywords,
+    onSuccess: (result) => {
+      setLastReprocess(result);
+      invalidateRiskData();
+    },
+  });
+
+  function submitNewKeyword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    createMutation.mutate(normalizeRiskPayload(form));
+  }
+
+  function startEdit(keyword: RiskKeyword) {
+    setEditingId(keyword.id);
+    setEditForm({
+      term: keyword.term,
+      category: keyword.category,
+      risk_level: keyword.risk_level,
+      description: keyword.description ?? "",
+      active: keyword.active,
+    });
+  }
+
+  function submitEdit(event: FormEvent<HTMLFormElement>, keywordId: string) {
+    event.preventDefault();
+    updateMutation.mutate({ id: keywordId, payload: normalizeRiskPayload(editForm) });
+  }
+
+  return (
+    <section className="grid gap-4 py-5 xl:grid-cols-[minmax(320px,420px)_1fr]">
+      <Panel title="Nova palavra de risco" icon={<ShieldAlert size={18} />}>
+        <form className="v-stack gap-3" onSubmit={submitNewKeyword}>
+          <RiskKeywordFields value={form} onChange={setForm} />
+          <button
+            className="ui-button ui-button-primary h-stack items-center gap-2"
+            type="submit"
+            disabled={createMutation.isPending}
+          >
+            {createMutation.isPending ? (
+              <Loader2 className="animate-spin" size={17} aria-hidden="true" />
+            ) : (
+              <Plus size={17} aria-hidden="true" />
+            )}
+            Cadastrar e reprocessar
+          </button>
+          <MutationError error={createMutation.error} />
+        </form>
+
+        <div className="grid gap-2 border-t border-line pt-4 sm:grid-cols-3">
+          <Metric label="Ativas" value={activeCount} />
+          <Metric label="Termos" value={keywords.length} />
+          <Metric label="Evidencias" value={totalMatches} />
+        </div>
+
+        <div className="v-stack gap-3 border-t border-line pt-4">
+          <button
+            className="ui-button h-stack items-center gap-2"
+            type="button"
+            disabled={reprocessMutation.isPending}
+            onClick={() => reprocessMutation.mutate()}
+          >
+            {reprocessMutation.isPending ? (
+              <Loader2 className="animate-spin" size={17} aria-hidden="true" />
+            ) : (
+              <RotateCw size={17} aria-hidden="true" />
+            )}
+            Reprocessar comunicacoes
+          </button>
+          <MutationError error={reprocessMutation.error} />
+          {lastReprocess && <RiskReprocessSummary result={lastReprocess} />}
+        </div>
+      </Panel>
+
+      <Panel title="Palavras configuradas" icon={<Tags size={18} />}>
+        {keywordsQuery.isLoading ? (
+          <LoadingState label="Carregando palavras de risco" />
+        ) : keywords.length === 0 ? (
+          <EmptyState label="Cadastre a primeira palavra para classificar comunicacoes." />
+        ) : (
+          <div className="v-stack gap-3">
+            {keywords.map((keyword) => {
+              const isEditing = editingId === keyword.id;
+              return (
+                <article key={keyword.id} className="ui-list-item v-stack gap-3">
+                  {isEditing ? (
+                    <form className="v-stack gap-3" onSubmit={(event) => submitEdit(event, keyword.id)}>
+                      <RiskKeywordFields value={editForm} onChange={setEditForm} />
+                      <div className="h-stack flex-wrap gap-2">
+                        <button
+                          className="ui-button ui-button-primary h-stack items-center gap-2"
+                          type="submit"
+                          disabled={updateMutation.isPending}
+                        >
+                          {updateMutation.isPending ? (
+                            <Loader2 className="animate-spin" size={17} aria-hidden="true" />
+                          ) : (
+                            <Save size={17} aria-hidden="true" />
+                          )}
+                          Salvar
+                        </button>
+                        <button className="ui-button" type="button" onClick={() => setEditingId(null)}>
+                          Cancelar
+                        </button>
+                      </div>
+                      <MutationError error={updateMutation.error} />
+                    </form>
+                  ) : (
+                    <>
+                      <div className="h-stack flex-wrap items-start gap-3">
+                        <div className="min-w-0 grow">
+                          <div className="h-stack flex-wrap items-center gap-2">
+                            <span className="break-words text-base font-semibold">{keyword.term}</span>
+                            <RiskLevelBadge level={keyword.risk_level} />
+                            <Badge>{keyword.category}</Badge>
+                            {keyword.active ? (
+                              <span className="h-stack items-center gap-1 text-xs font-semibold text-success">
+                                <ShieldCheck size={14} aria-hidden="true" />
+                                Ativa
+                              </span>
+                            ) : (
+                              <span className="text-xs font-semibold text-neutral-500">Inativa</span>
+                            )}
+                          </div>
+                          {keyword.description && (
+                            <p className="mt-2 text-sm leading-6 text-neutral-700">{keyword.description}</p>
+                          )}
+                        </div>
+                        <div className="h-stack shrink-0 gap-2">
+                          <button className="ui-button" type="button" onClick={() => startEdit(keyword)}>
+                            Editar
+                          </button>
+                          <button
+                            className="ui-icon-button text-danger hover:text-danger"
+                            type="button"
+                            title="Excluir palavra"
+                            disabled={deleteMutation.isPending}
+                            onClick={() => deleteMutation.mutate(keyword.id)}
+                          >
+                            <Trash2 size={16} aria-hidden="true" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="h-stack flex-wrap gap-2 text-xs text-neutral-600">
+                        <Badge>{keyword.match_count} evidencias</Badge>
+                        <span>Atualizada em {formatDateTime(keyword.updated_at)}</span>
+                      </div>
+                    </>
+                  )}
+                </article>
+              );
+            })}
+          </div>
         )}
       </Panel>
     </section>
@@ -662,7 +932,7 @@ function ExportsView({
 
 function Panel({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
   return (
-    <section className="ui-panel v-stack gap-4">
+    <section className="ui-panel v-stack min-w-0 gap-4">
       <div className="h-stack items-center gap-2">
         <span className="text-brand-700">{icon}</span>
         <h2 className="text-base font-semibold">{title}</h2>
@@ -698,6 +968,112 @@ function ClientSelect({
             {client.name}
           </option>
         ))}
+      </select>
+    </label>
+  );
+}
+
+function RiskKeywordFields({
+  value,
+  onChange,
+}: {
+  value: RiskKeywordPayload;
+  onChange: (value: RiskKeywordPayload) => void;
+}) {
+  return (
+    <>
+      <label className="v-stack gap-1 text-sm font-medium">
+        Palavra-chave
+        <input
+          className="ui-input"
+          value={value.term}
+          onChange={(event) => onChange({ ...value, term: event.target.value })}
+          minLength={2}
+          maxLength={255}
+          required
+          placeholder="sisbajud, penhora, Banco do Brasil"
+        />
+      </label>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="v-stack gap-1 text-sm font-medium">
+          Categoria
+          <input
+            className="ui-input"
+            list="risk-category-options"
+            value={value.category}
+            onChange={(event) => onChange({ ...value, category: event.target.value })}
+            minLength={2}
+            maxLength={80}
+            required
+          />
+        </label>
+        <RiskLevelSelect
+          value={value.risk_level}
+          onChange={(riskLevel) => onChange({ ...value, risk_level: riskLevel })}
+        />
+      </div>
+      <datalist id="risk-category-options">
+        <option value="Bloqueio judicial" />
+        <option value="Instituicao financeira" />
+        <option value="Garantias" />
+        <option value="Prazo critico" />
+        <option value="Geral" />
+      </datalist>
+      <label className="v-stack gap-1 text-sm font-medium">
+        Observacao
+        <textarea
+          className="ui-input min-h-24 resize-y"
+          value={value.description ?? ""}
+          onChange={(event) => onChange({ ...value, description: event.target.value })}
+          maxLength={1000}
+        />
+      </label>
+      <label className="h-stack items-center gap-2 text-sm font-medium">
+        <input
+          className="h-4 w-4 accent-brand-600"
+          type="checkbox"
+          checked={value.active}
+          onChange={(event) => onChange({ ...value, active: event.target.checked })}
+        />
+        Incluir nas proximas verificacoes
+      </label>
+    </>
+  );
+}
+
+function RiskLevelSelect({
+  value,
+  onChange,
+}: {
+  value: RiskLevel;
+  onChange: (value: RiskLevel) => void;
+}) {
+  return (
+    <label className="v-stack gap-1 text-sm font-medium">
+      Nivel
+      <select className="ui-input" value={value} onChange={(event) => onChange(event.target.value as RiskLevel)}>
+        {riskLevelOptions.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function RiskFilter({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="v-stack gap-1 text-sm font-medium">
+      Risco
+      <select className="ui-input" value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="todos">Todos</option>
+        <option value="com_risco">Com risco</option>
+        <option value="critico">Critico</option>
+        <option value="alto">Alto</option>
+        <option value="medio">Medio</option>
+        <option value="baixo">Baixo</option>
+        <option value="sem_risco">Sem risco</option>
       </select>
     </label>
   );
@@ -745,6 +1121,7 @@ function ProcessSummary({ detail }: { detail: ProcessDetail }) {
       <Metric label="Ultima" value={formatDate(detail.last_movement_at)} />
       <div className="v-stack gap-2 md:col-span-4">
         <ProcessParties parties={detail.process_parties} />
+        <ProcessRiskSummary process={detail} />
         <div className="h-stack flex-wrap gap-2">
           {detail.external_link && (
             <a
@@ -758,6 +1135,7 @@ function ProcessSummary({ detail }: { detail: ProcessDetail }) {
             </a>
           )}
         </div>
+        <RiskEvidenceList matches={detail.risk_matches} compact />
       </div>
     </div>
   );
@@ -924,6 +1302,7 @@ function TimelineItem({ communication, terms }: { communication: Communication; 
           </a>
         )}
       </div>
+      <RiskEvidenceList matches={communication.risk_matches} />
       <p className="whitespace-pre-wrap text-sm leading-6 text-neutral-800">
         <HighlightedText text={communication.plain_text} terms={terms} />
       </p>
@@ -983,6 +1362,98 @@ function ProcessParties({ parties, compact = false }: { parties: ProcessParty[];
       {parties.length > visibleParties.length && (
         <span className="text-xs text-neutral-500">+{parties.length - visibleParties.length} partes</span>
       )}
+    </div>
+  );
+}
+
+function ProcessRiskSummary({ process, compact = false }: { process: ProcessListItem; compact?: boolean }) {
+  if (process.risk_matches_count === 0 || !process.highest_risk_level) {
+    return compact ? (
+      <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-success">
+        Sem risco
+      </span>
+    ) : (
+      <div className="h-stack items-center gap-2 text-sm text-success">
+        <ShieldCheck size={16} aria-hidden="true" />
+        Nenhuma palavra de risco localizada
+      </div>
+    );
+  }
+
+  const visibleMatches = process.risk_matches.slice(0, compact ? 1 : 3);
+  return (
+    <div className="v-stack gap-1">
+      <div className="h-stack flex-wrap items-center gap-2">
+        <RiskLevelBadge level={process.highest_risk_level} />
+        <Badge>{process.risk_matches_count} evidencias</Badge>
+      </div>
+      {!compact && (
+        <div className="h-stack flex-wrap gap-2">
+          {visibleMatches.map((match) => (
+            <Badge key={match.id}>{match.keyword}</Badge>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RiskEvidenceList({ matches, compact = false }: { matches: RiskMatch[]; compact?: boolean }) {
+  if (matches.length === 0) {
+    return null;
+  }
+  const visibleMatches = compact ? matches.slice(0, 4) : matches;
+  return (
+    <div className="v-stack gap-2 rounded-md border border-amber-200 bg-amber-50 p-3">
+      <div className="h-stack flex-wrap items-center gap-2">
+        <ShieldAlert size={16} className="text-warning" aria-hidden="true" />
+        <span className="text-sm font-semibold text-ink">Evidencias de risco</span>
+        <Badge>{matches.length}</Badge>
+      </div>
+      <div className="v-stack gap-2">
+        {visibleMatches.map((match) => (
+          <div key={match.id} className="v-stack gap-1 rounded-md bg-white/80 p-2 text-sm">
+            <div className="h-stack flex-wrap items-center gap-2">
+              <RiskLevelBadge level={match.risk_level} />
+              <span className="font-semibold">{match.keyword}</span>
+              <Badge>{match.category}</Badge>
+              <span className="text-xs text-neutral-600">{riskSourceLabel(match.source)}</span>
+            </div>
+            {!compact && <p className="leading-6 text-neutral-700">{match.excerpt}</p>}
+          </div>
+        ))}
+        {matches.length > visibleMatches.length && (
+          <span className="text-xs font-medium text-neutral-600">
+            +{matches.length - visibleMatches.length} evidencias neste processo
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RiskLevelBadge({ level }: { level: RiskLevel }) {
+  const style =
+    level === "critico"
+      ? "border-red-200 bg-red-50 text-danger"
+      : level === "alto"
+        ? "border-amber-200 bg-amber-50 text-warning"
+        : level === "medio"
+          ? "border-blue-200 bg-brand-50 text-brand-700"
+          : "border-emerald-200 bg-emerald-50 text-success";
+  return (
+    <span className={cn("rounded-md border px-2 py-1 text-xs font-semibold", style)}>
+      {riskLevelLabel(level)}
+    </span>
+  );
+}
+
+function RiskReprocessSummary({ result }: { result: RiskReprocess }) {
+  return (
+    <div className="grid gap-2 rounded-md border border-line bg-white p-3 text-sm sm:grid-cols-3">
+      <Metric label="Lidas" value={result.scanned_communications} />
+      <Metric label="Com risco" value={result.matched_communications} />
+      <Metric label="Evidencias" value={result.matches_created} />
     </div>
   );
 }
@@ -1059,6 +1530,7 @@ function highlightTerms(detail: ProcessDetail, client: Client | null): string[] 
   return [
     client?.name ?? "",
     ...detail.process_parties.map((party) => party.name),
+    ...detail.risk_matches.map((match) => match.keyword),
     detail.formatted_number,
     detail.numero_processo,
     "prazo",
@@ -1072,6 +1544,26 @@ function highlightTerms(detail: ProcessDetail, client: Client | null): string[] 
     "sentenca",
     "sentença",
   ];
+}
+
+function defaultRiskForm(): RiskKeywordPayload {
+  return {
+    term: "",
+    category: "Geral",
+    risk_level: "medio",
+    description: "",
+    active: true,
+  };
+}
+
+function normalizeRiskPayload(payload: RiskKeywordPayload): RiskKeywordPayload {
+  return {
+    term: payload.term.trim(),
+    category: payload.category.trim() || "Geral",
+    risk_level: payload.risk_level,
+    description: payload.description?.trim() || null,
+    active: payload.active,
+  };
 }
 
 function uniqueOptions(values: Array<string | null | undefined> | undefined): string[] {
@@ -1099,6 +1591,32 @@ function datajudLabel(status: string): string {
     return "Erro DataJud";
   }
   return "Pendente";
+}
+
+function riskLevelLabel(level: RiskLevel): string {
+  if (level === "critico") {
+    return "Critico";
+  }
+  if (level === "alto") {
+    return "Alto";
+  }
+  if (level === "medio") {
+    return "Medio";
+  }
+  return "Baixo";
+}
+
+function riskSourceLabel(source: string): string {
+  if (source === "texto") {
+    return "Texto da comunicacao";
+  }
+  if (source === "partes") {
+    return "Partes";
+  }
+  if (source === "metadados") {
+    return "Metadados";
+  }
+  return source;
 }
 
 function statusLabel(status: string): string {

@@ -169,6 +169,9 @@ class Communication(TimestampMixin, Base):
     communication_lawyers: Mapped[list["CommunicationLawyer"]] = relationship(
         back_populates="communication", cascade="all, delete-orphan"
     )
+    risk_matches: Mapped[list["CommunicationRiskMatch"]] = relationship(
+        back_populates="communication", cascade="all, delete-orphan"
+    )
 
 
 class CommunicationParty(TimestampMixin, Base):
@@ -220,3 +223,50 @@ class CommunicationLawyer(TimestampMixin, Base):
 
     communication: Mapped["Communication"] = relationship(back_populates="communication_lawyers")
     lawyer: Mapped["Lawyer"] = relationship(back_populates="communication_lawyers")
+
+
+class RiskKeyword(TimestampMixin, Base):
+    __tablename__ = "risk_keywords"
+    __table_args__ = (
+        UniqueConstraint("normalized_term", name="uq_risk_keywords_normalized_term"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    term: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_term: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(80), nullable=False, default="Geral")
+    risk_level: Mapped[str] = mapped_column(String(16), nullable=False, default="medio", index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+
+    matches: Mapped[list["CommunicationRiskMatch"]] = relationship(
+        back_populates="keyword", cascade="all, delete-orphan"
+    )
+
+
+class CommunicationRiskMatch(TimestampMixin, Base):
+    __tablename__ = "communication_risk_matches"
+    __table_args__ = (
+        UniqueConstraint(
+            "communication_id",
+            "risk_keyword_id",
+            "source",
+            name="uq_communication_risk_match_source",
+        ),
+        Index("ix_communication_risk_matches_keyword", "risk_keyword_id"),
+        Index("ix_communication_risk_matches_communication", "communication_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    communication_id: Mapped[str] = mapped_column(
+        ForeignKey("communications.id", ondelete="CASCADE"), nullable=False
+    )
+    risk_keyword_id: Mapped[str] = mapped_column(
+        ForeignKey("risk_keywords.id", ondelete="CASCADE"), nullable=False
+    )
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    matched_text: Mapped[str] = mapped_column(String(255), nullable=False)
+    excerpt: Mapped[str] = mapped_column(Text, nullable=False)
+
+    communication: Mapped["Communication"] = relationship(back_populates="risk_matches")
+    keyword: Mapped["RiskKeyword"] = relationship(back_populates="matches")

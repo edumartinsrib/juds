@@ -25,7 +25,15 @@ from app.models import (
     CommunicationParty,
     Lawyer,
     Process,
+    CommunicationRiskMatch,
+    RiskKeyword,
     SearchRun,
+)
+from app.risk import (
+    RISK_LEVEL_ORDER,
+    normalize_risk_term,
+    reprocess_all_risk_matches,
+    risk_keyword_match_counts,
 )
 from app.schemas import (
     ClientCreate,
@@ -41,6 +49,12 @@ from app.schemas import (
     ProcessEnrichmentRead,
     ProcessListItem,
     ProcessPartyRead,
+    RiskKeywordCreate,
+    RiskKeywordMutationRead,
+    RiskKeywordRead,
+    RiskKeywordUpdate,
+    RiskMatchRead,
+    RiskReprocessRead,
     SearchRunCreate,
     SearchRunRead,
     cpf_to_masked,
@@ -69,6 +83,101 @@ def get_datajud_client() -> DataJudClient | None:
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/risk-keywords", response_model=list[RiskKeywordRead])
+async def list_risk_keywords(session: AsyncSession = Depends(get_session)) -> list[RiskKeywordRead]:
+    result = await session.execute(
+        select(RiskKeyword).order_by(RiskKeyword.category.asc(), RiskKeyword.term.asc())
+    )
+    keywords = result.scalars().all()
+    counts = await risk_keyword_match_counts(session)
+    return [_risk_keyword_read(keyword, counts.get(keyword.id, 0)) for keyword in keywords]
+
+
+@router.post("/risk-keywords", response_model=RiskKeywordMutationRead, status_code=201)
+async def create_risk_keyword(
+    payload: RiskKeywordCreate,
+    session: AsyncSession = Depends(get_session),
+) -> RiskKeywordMutationRead:
+    normalized_term = normalize_risk_term(payload.term)
+    await _ensure_unique_risk_keyword(session, normalized_term)
+    keyword = RiskKeyword(
+        term=payload.term,
+        normalized_term=normalized_term,
+        category=payload.category,
+        risk_level=payload.risk_level,
+        description=payload.description,
+        active=payload.active,
+    )
+    session.add(keyword)
+    await session.flush()
+    reprocess = await reprocess_all_risk_matches(session)
+    await session.commit()
+    await session.refresh(keyword)
+    counts = await risk_keyword_match_counts(session)
+    return RiskKeywordMutationRead(
+        keyword=_risk_keyword_read(keyword, counts.get(keyword.id, 0)),
+        reprocess=_risk_reprocess_read(reprocess),
+    )
+
+
+@router.patch("/risk-keywords/{keyword_id}", response_model=RiskKeywordMutationRead)
+async def update_risk_keyword(
+    keyword_id: str,
+    payload: RiskKeywordUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> RiskKeywordMutationRead:
+    keyword = await session.get(RiskKeyword, keyword_id)
+    if not keyword:
+        raise HTTPException(status_code=404, detail="Palavra de risco nao encontrada")
+
+    fields = payload.model_fields_set
+    if "term" in fields and payload.term is not None:
+        normalized_term = normalize_risk_term(payload.term)
+        await _ensure_unique_risk_keyword(session, normalized_term, keyword_id=keyword.id)
+        keyword.term = payload.term
+        keyword.normalized_term = normalized_term
+    if "category" in fields and payload.category is not None:
+        keyword.category = payload.category
+    if "risk_level" in fields and payload.risk_level is not None:
+        keyword.risk_level = payload.risk_level
+    if "description" in fields:
+        keyword.description = payload.description
+    if "active" in fields and payload.active is not None:
+        keyword.active = payload.active
+
+    await session.flush()
+    reprocess = await reprocess_all_risk_matches(session)
+    await session.commit()
+    await session.refresh(keyword)
+    counts = await risk_keyword_match_counts(session)
+    return RiskKeywordMutationRead(
+        keyword=_risk_keyword_read(keyword, counts.get(keyword.id, 0)),
+        reprocess=_risk_reprocess_read(reprocess),
+    )
+
+
+@router.delete("/risk-keywords/{keyword_id}", response_model=RiskKeywordMutationRead)
+async def delete_risk_keyword(
+    keyword_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> RiskKeywordMutationRead:
+    keyword = await session.get(RiskKeyword, keyword_id)
+    if not keyword:
+        raise HTTPException(status_code=404, detail="Palavra de risco nao encontrada")
+    await session.delete(keyword)
+    await session.flush()
+    reprocess = await reprocess_all_risk_matches(session)
+    await session.commit()
+    return RiskKeywordMutationRead(keyword=None, reprocess=_risk_reprocess_read(reprocess))
+
+
+@router.post("/risk-keywords/reprocess", response_model=RiskReprocessRead)
+async def reprocess_risk_keywords(session: AsyncSession = Depends(get_session)) -> RiskReprocessRead:
+    reprocess = await reprocess_all_risk_matches(session)
+    await session.commit()
+    return _risk_reprocess_read(reprocess)
 
 
 @router.post("/clients", response_model=ClientRead, status_code=201)
@@ -123,7 +232,12 @@ async def list_processes(
     statement = (
         select(Process, ClientProcess)
         .join(ClientProcess, ClientProcess.process_id == Process.id)
-        .options(selectinload(Process.communications).selectinload(Communication.parties))
+        .options(
+            selectinload(Process.communications).selectinload(Communication.parties),
+            selectinload(Process.communications)
+            .selectinload(Communication.risk_matches)
+            .selectinload(CommunicationRiskMatch.keyword),
+        )
         .order_by(ClientProcess.last_movement_at.desc().nullslast(), Process.numero_processo.asc())
     )
     if client_id:
@@ -196,6 +310,9 @@ async def _get_process_for_detail(session: AsyncSession, process_id: str) -> Pro
         .options(
             selectinload(Process.communications).selectinload(Communication.parties),
             selectinload(Process.communications)
+            .selectinload(Communication.risk_matches)
+            .selectinload(CommunicationRiskMatch.keyword),
+            selectinload(Process.communications)
             .selectinload(Communication.communication_lawyers)
             .selectinload(CommunicationLawyer.lawyer),
             selectinload(Process.client_processes).selectinload(ClientProcess.client),
@@ -232,6 +349,7 @@ async def get_communication(
         .where(Communication.id == communication_id)
         .options(
             selectinload(Communication.parties),
+            selectinload(Communication.risk_matches).selectinload(CommunicationRiskMatch.keyword),
             selectinload(Communication.communication_lawyers).selectinload(CommunicationLawyer.lawyer),
         )
     )
@@ -320,6 +438,7 @@ def _search_run_read(run: SearchRun) -> SearchRunRead:
 
 
 def _process_item(process: Process, client_process: ClientProcess | None) -> ProcessListItem:
+    risk_matches = _process_risk_matches(process)
     return ProcessListItem(
         id=process.id,
         numero_processo=process.numero_processo,
@@ -336,6 +455,9 @@ def _process_item(process: Process, client_process: ClientProcess | None) -> Pro
         datajud_synced_at=process.datajud_synced_at,
         datajud_last_movement_at=process.datajud_last_movement_at,
         process_parties=_process_parties(process),
+        risk_matches_count=len(risk_matches),
+        highest_risk_level=_highest_risk_level(risk_matches),
+        risk_matches=risk_matches,
     )
 
 
@@ -535,7 +657,91 @@ def _communication_item(communication: Communication) -> CommunicationListItem:
         meio=communication.meio,
         external_link=communication.external_link,
         plain_text=communication.plain_text,
+        risk_matches=_risk_matches_read(communication.risk_matches),
     )
+
+
+async def _ensure_unique_risk_keyword(
+    session: AsyncSession,
+    normalized_term: str,
+    *,
+    keyword_id: str | None = None,
+) -> None:
+    statement = select(RiskKeyword).where(RiskKeyword.normalized_term == normalized_term)
+    if keyword_id:
+        statement = statement.where(RiskKeyword.id != keyword_id)
+    existing = (await session.execute(statement)).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="Palavra de risco ja cadastrada")
+
+
+def _risk_keyword_read(keyword: RiskKeyword, match_count: int) -> RiskKeywordRead:
+    return RiskKeywordRead(
+        id=keyword.id,
+        term=keyword.term,
+        normalized_term=keyword.normalized_term,
+        category=keyword.category,
+        risk_level=keyword.risk_level,
+        description=keyword.description,
+        active=keyword.active,
+        match_count=match_count,
+        created_at=keyword.created_at,
+        updated_at=keyword.updated_at,
+    )
+
+
+def _risk_reprocess_read(reprocess) -> RiskReprocessRead:
+    return RiskReprocessRead(
+        scanned_communications=reprocess.scanned_communications,
+        matched_communications=reprocess.matched_communications,
+        matches_created=reprocess.matches_created,
+    )
+
+
+def _process_risk_matches(process: Process) -> list[RiskMatchRead]:
+    return _risk_matches_read(
+        [
+            match
+            for communication in process.communications
+            for match in communication.risk_matches
+        ]
+    )
+
+
+def _risk_matches_read(matches: list[CommunicationRiskMatch]) -> list[RiskMatchRead]:
+    return [
+        _risk_match_read(match)
+        for match in sorted(
+            matches,
+            key=lambda item: (
+                -RISK_LEVEL_ORDER.get(item.keyword.risk_level if item.keyword else "", 0),
+                item.keyword.category if item.keyword else "",
+                item.keyword.term if item.keyword else "",
+                item.source,
+            ),
+        )
+    ]
+
+
+def _risk_match_read(match: CommunicationRiskMatch) -> RiskMatchRead:
+    keyword = match.keyword
+    return RiskMatchRead(
+        id=match.id,
+        keyword_id=match.risk_keyword_id,
+        keyword=keyword.term if keyword else "Palavra removida",
+        category=keyword.category if keyword else "Geral",
+        risk_level=keyword.risk_level if keyword else "medio",
+        source=match.source,
+        matched_text=match.matched_text,
+        excerpt=match.excerpt,
+        created_at=match.created_at,
+    )
+
+
+def _highest_risk_level(matches: list[RiskMatchRead]) -> str | None:
+    if not matches:
+        return None
+    return max(matches, key=lambda match: RISK_LEVEL_ORDER.get(match.risk_level, 0)).risk_level
 
 
 async def _export_rows(session: AsyncSession, client_id: str) -> list[dict[str, str]]:
@@ -544,10 +750,12 @@ async def _export_rows(session: AsyncSession, client_id: str) -> list[dict[str, 
         .join(ClientProcess, ClientProcess.process_id == Process.id)
         .join(Communication, Communication.process_id == Process.id)
         .where(ClientProcess.client_id == client_id)
+        .options(selectinload(Communication.risk_matches).selectinload(CommunicationRiskMatch.keyword))
         .order_by(Process.numero_processo.asc(), Communication.data_disponibilizacao.asc())
     )
     rows = []
     for process, client_process, communication in result.all():
+        risk_matches = _risk_matches_read(communication.risk_matches)
         rows.append(
             {
                 "processo": process.formatted_number,
@@ -572,6 +780,11 @@ async def _export_rows(session: AsyncSession, client_id: str) -> list[dict[str, 
                 "datajud_sigilo": _optional_int_to_text(process.datajud_secrecy_level),
                 "datajud_assuntos": "; ".join(datajud_subject_names(process.datajud_payload)),
                 "datajud_movimentos_count": str(process.datajud_movements_count or 0),
+                "risco_nivel": _highest_risk_level(risk_matches) or "",
+                "risco_palavras": "; ".join(
+                    f"{match.keyword} ({match.risk_level})" for match in risk_matches
+                ),
+                "risco_evidencias": " | ".join(match.excerpt for match in risk_matches),
                 "link": communication.external_link or "",
                 "texto": communication.plain_text,
             }
@@ -600,6 +813,9 @@ def _export_csv(rows: list[dict[str, str]]) -> str:
         "datajud_sigilo",
         "datajud_assuntos",
         "datajud_movimentos_count",
+        "risco_nivel",
+        "risco_palavras",
+        "risco_evidencias",
         "link",
         "texto",
     ]
@@ -632,6 +848,9 @@ def _export_xlsx(rows: list[dict[str, str]]) -> bytes:
         "datajud_sigilo",
         "datajud_assuntos",
         "datajud_movimentos_count",
+        "risco_nivel",
+        "risco_palavras",
+        "risco_evidencias",
         "link",
         "texto",
     ]
