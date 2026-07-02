@@ -1,16 +1,22 @@
 import httpx
 from sqlalchemy import select
 
+from app.api import get_datajud_client, get_djen_client
+from app.datajud import DataJudSearchResult
 from app.importer import DjenImporter
 from app.main import create_app
 from app.models import Client, Communication
 
 from app.djen import DjenPage
-from tests.test_importer import FakeDjenClient, djen_item, noop_sleep
+from tests.test_datajud import datajud_source
+from tests.test_importer import FakeDataJudClient, FakeDjenClient, djen_item, noop_sleep
 
 
-def api_client() -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=create_app())
+def api_client(overrides=None) -> httpx.AsyncClient:
+    app = create_app()
+    for dependency, override in (overrides or {}).items():
+        app.dependency_overrides[dependency] = override
+    transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
@@ -70,7 +76,49 @@ async def test_client_search_run_and_export_flow(session) -> None:
         assert detail["timeline"][0]["plain_text"] == "Intimacao com prazo de 10 dias"
         assert detail["lawyers"][0]["name"] == "Maria Advogada"
 
-        communication_id = (await session.execute(select(Communication.id))).scalar_one()
+        fake_datajud = FakeDataJudClient(
+            [
+                DataJudSearchResult(
+                    alias="tjsp",
+                    source={
+                        **datajud_source(),
+                        "poloAtivo": [{"nome": "Autor DataJud"}],
+                    },
+                    total=1,
+                )
+            ]
+        )
+        fake_djen = FakeDjenClient(
+            [
+                DjenPage(
+                    items=[djen_item(78)],
+                    count=1,
+                    rate_limit_limit=100,
+                    rate_limit_remaining=98,
+                )
+            ]
+        )
+        async with api_client(
+            {
+                get_djen_client: lambda: fake_djen,
+                get_datajud_client: lambda: fake_datajud,
+            }
+        ) as enrich_client:
+            enrich_response = await enrich_client.post(f"/api/processes/{processes[0]['id']}/enrich", json={})
+        assert enrich_response.status_code == 200
+        enrichment = enrich_response.json()
+        assert enrichment["datajud_attempted"] is True
+        assert enrichment["start_date"] == "2024-01-10"
+        assert enrichment["djen_items_found"] == 1
+        assert enrichment["djen_imported"] == 1
+        assert enrichment["process"]["datajud"]["status"] == "synced"
+        assert enrichment["process"]["datajud"]["movements_count"] == 2
+        assert {"name": "Autor DataJud", "polo": "A", "source": "datajud"} in enrichment["process"]["process_parties"]
+        assert fake_djen.calls[0]["numero_processo"] == "00012345620248260100"
+
+        communication_id = (
+            await session.execute(select(Communication.id).order_by(Communication.djen_id.asc()))
+        ).scalars().first()
         communication_response = await client.get(f"/api/communications/{communication_id}")
         assert communication_response.status_code == 200
         assert communication_response.json()["numero_processo"] == "00012345620248260100"

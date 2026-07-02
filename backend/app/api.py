@@ -12,9 +12,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import get_settings
 from app.db import get_session
-from app.datajud import datajud_movements, datajud_subject_names
-from app.importer import enqueue_search_run
+from app.datajud import DataJudClient, datajud_movements, datajud_subject_names
+from app.djen import DjenClient, DjenRateLimitError
+from app.importer import DjenImporter, enqueue_search_run
 from app.models import (
     Client,
     ClientProcess,
@@ -35,6 +37,8 @@ from app.schemas import (
     LawyerRead,
     PartyRead,
     ProcessDetail,
+    ProcessEnrichmentCreate,
+    ProcessEnrichmentRead,
     ProcessListItem,
     ProcessPartyRead,
     SearchRunCreate,
@@ -44,6 +48,22 @@ from app.schemas import (
 from app.utils import get_first, mask_cpf, normalize_name
 
 router = APIRouter(prefix="/api")
+
+
+def get_djen_client() -> DjenClient:
+    settings = get_settings()
+    return DjenClient(settings.djen_base_url)
+
+
+def get_datajud_client() -> DataJudClient | None:
+    settings = get_settings()
+    if not settings.datajud_api_key:
+        return None
+    return DataJudClient(
+        settings.datajud_base_url,
+        settings.datajud_api_key,
+        timeout=settings.datajud_timeout_seconds,
+    )
 
 
 @router.get("/health")
@@ -114,6 +134,62 @@ async def list_processes(
 
 @router.get("/processes/{process_id}", response_model=ProcessDetail)
 async def get_process(process_id: str, session: AsyncSession = Depends(get_session)) -> ProcessDetail:
+    process = await _get_process_for_detail(session, process_id)
+    if not process:
+        raise HTTPException(status_code=404, detail="Processo nao encontrado")
+    return _process_detail(process)
+
+
+@router.post("/processes/{process_id}/enrich", response_model=ProcessEnrichmentRead)
+async def enrich_process(
+    process_id: str,
+    payload: ProcessEnrichmentCreate,
+    session: AsyncSession = Depends(get_session),
+    djen_client: DjenClient = Depends(get_djen_client),
+    datajud_client: DataJudClient | None = Depends(get_datajud_client),
+) -> ProcessEnrichmentRead:
+    process = await _get_process_for_detail(session, process_id)
+    if not process:
+        raise HTTPException(status_code=404, detail="Processo nao encontrado")
+    if payload.start_date and payload.end_date and payload.start_date > payload.end_date:
+        raise HTTPException(status_code=422, detail="Data inicial deve ser anterior a data final")
+
+    clients = [client_process.client for client_process in process.client_processes]
+    importer = DjenImporter(session, djen_client, datajud_client=datajud_client)
+    try:
+        result = await importer.enrich_process_by_number(
+            process,
+            clients,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            force_datajud=payload.force_datajud,
+        )
+    except DjenRateLimitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit do DJEN; tente novamente em alguns instantes",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    await session.commit()
+    refreshed = await _get_process_for_detail(session, result.process.id)
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="Processo nao encontrado")
+    return ProcessEnrichmentRead(
+        process=_process_detail(refreshed),
+        start_date=result.start_date,
+        end_date=result.end_date,
+        datajud_attempted=result.datajud_attempted,
+        djen_items_found=result.djen_items_found,
+        djen_imported=result.djen_imported,
+        djen_pages=result.djen_pages,
+        rate_limit_limit=result.rate_limit_limit,
+        rate_limit_remaining=result.rate_limit_remaining,
+    )
+
+
+async def _get_process_for_detail(session: AsyncSession, process_id: str) -> Process | None:
     result = await session.execute(
         select(Process)
         .where(Process.id == process_id)
@@ -122,12 +198,13 @@ async def get_process(process_id: str, session: AsyncSession = Depends(get_sessi
             selectinload(Process.communications)
             .selectinload(Communication.communication_lawyers)
             .selectinload(CommunicationLawyer.lawyer),
-            selectinload(Process.client_processes),
+            selectinload(Process.client_processes).selectinload(ClientProcess.client),
         )
     )
-    process = result.scalar_one_or_none()
-    if not process:
-        raise HTTPException(status_code=404, detail="Processo nao encontrado")
+    return result.scalar_one_or_none()
+
+
+def _process_detail(process: Process) -> ProcessDetail:
     client_process = process.client_processes[0] if process.client_processes else None
     timeline = sorted(process.communications, key=lambda item: (item.data_disponibilizacao, item.id))
     parties = [party for communication in timeline for party in communication.parties]

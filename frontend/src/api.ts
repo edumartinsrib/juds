@@ -1,6 +1,7 @@
 import type {
   Client,
   CommunicationDetail,
+  ProcessEnrichment,
   ProcessDetail,
   ProcessListItem,
   SearchRun,
@@ -55,6 +56,16 @@ export function listProcesses(clientId?: string | null): Promise<ProcessListItem
 
 export function getProcess(processId: string): Promise<ProcessDetail> {
   return request<ProcessDetail>(`/api/processes/${processId}`);
+}
+
+export function enrichProcess(
+  processId: string,
+  payload: { start_date?: string; end_date?: string; force_datajud?: boolean } = {},
+): Promise<ProcessEnrichment> {
+  return request<ProcessEnrichment>(`/api/processes/${processId}/enrich`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getCommunication(communicationId: string): Promise<CommunicationDetail> {

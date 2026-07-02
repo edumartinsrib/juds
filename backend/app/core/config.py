@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     datajud_timeout_seconds: float = 30.0
     datajud_refresh_hours: int = 24
     search_window_days: int = 30
+    process_enrichment_window_days: int = 3650
     rate_limit_sleep_seconds: int = 60
     api_cors_origins: str = "http://localhost:5173"
 

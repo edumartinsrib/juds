@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -55,10 +56,32 @@ DJEN_RATE_LIMIT_MESSAGE = "Rate limit do DJEN; retomando apos pausa."
 DJEN_RATE_LIMIT_WAIT_MESSAGE = "DJEN sem saldo de requisicoes; aguardando nova janela."
 
 
+@dataclass(frozen=True)
+class ProcessEnrichmentResult:
+    process: Process
+    start_date: date
+    end_date: date
+    datajud_attempted: bool
+    djen_items_found: int
+    djen_imported: int
+    djen_pages: int
+    rate_limit_limit: int | None
+    rate_limit_remaining: int | None
+
+
 def default_search_window() -> tuple[date, date]:
     settings = get_settings()
     end_date = date.today()
     start_date = end_date - timedelta(days=max(settings.search_window_days - 1, 0))
+    return start_date, end_date
+
+
+def default_process_enrichment_window(process: Process | None = None) -> tuple[date, date]:
+    settings = get_settings()
+    end_date = date.today()
+    if process and process.datajud_filed_at:
+        return process.datajud_filed_at.date(), end_date
+    start_date = end_date - timedelta(days=max(settings.process_enrichment_window_days - 1, 0))
     return start_date, end_date
 
 
@@ -233,6 +256,72 @@ class DjenImporter:
                 run.current_page,
             )
             raise
+
+    async def enrich_process_by_number(
+        self,
+        process: Process,
+        clients: list[Client],
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        force_datajud: bool = True,
+    ) -> ProcessEnrichmentResult:
+        datajud_attempted = await self._maybe_enrich_process_with_datajud(
+            process,
+            force=force_datajud,
+        )
+        default_start, default_end = default_process_enrichment_window(process)
+        cursor_start = start_date or default_start
+        cursor_end = end_date or default_end
+        if cursor_start > cursor_end:
+            raise ValueError("Data inicial deve ser anterior a data final")
+
+        djen_items_found = 0
+        djen_imported = 0
+        djen_pages = 0
+        rate_limit_limit: int | None = None
+        rate_limit_remaining: int | None = None
+        page = 1
+
+        while True:
+            djen_page = await self.djen_client.fetch_comunicacoes_por_processo(
+                numero_processo=process.numero_processo,
+                start_date=cursor_start,
+                end_date=cursor_end,
+                page=page,
+                sigla_tribunal=process.tribunal,
+            )
+            djen_pages += 1
+            djen_items_found = max(djen_items_found, djen_page.count)
+            rate_limit_limit = djen_page.rate_limit_limit
+            rate_limit_remaining = djen_page.rate_limit_remaining
+
+            matching_items = [
+                item
+                for item in djen_page.items
+                if self._process_number_from_item(item) == process.numero_processo
+            ]
+            djen_imported += await self._import_items_for_clients(clients, matching_items)
+            await self.session.flush()
+
+            if len(djen_page.items) < 100 or page * 100 >= djen_page.count:
+                break
+            page += 1
+            if djen_page.rate_limit_remaining == 0:
+                await self.sleep(self.rate_limit_sleep_seconds)
+
+        await self.session.refresh(process)
+        return ProcessEnrichmentResult(
+            process=process,
+            start_date=cursor_start,
+            end_date=cursor_end,
+            datajud_attempted=datajud_attempted,
+            djen_items_found=djen_items_found,
+            djen_imported=djen_imported,
+            djen_pages=djen_pages,
+            rate_limit_limit=rate_limit_limit,
+            rate_limit_remaining=rate_limit_remaining,
+        )
 
     def _record_rate_limit(self, run: SearchRun, page: DjenPage) -> None:
         run.rate_limit_limit = page.rate_limit_limit
@@ -501,17 +590,26 @@ class DjenImporter:
         )
         return int(count or 0)
 
+    async def _import_items_for_clients(self, clients: list[Client], items: list[dict[str, Any]]) -> int:
+        imported = 0
+        unique_clients = list({client.id: client for client in clients}.values())
+        for index, client in enumerate(unique_clients):
+            client_imported = await self.import_items(client, items)
+            if index == 0:
+                imported += client_imported
+        return imported
+
     def _process_number_from_item(self, item: dict[str, Any]) -> str:
         raw_process_number = _to_str(
             get_first(item, "numero_processo", "numeroProcesso", "numeroprocessocommascara")
         )
         return normalize_process_number(raw_process_number)
 
-    async def _maybe_enrich_process_with_datajud(self, process: Process) -> None:
-        if not self.datajud_client or not self._should_refresh_datajud(process):
-            return
-        if process.id in self._datajud_checked_process_ids:
-            return
+    async def _maybe_enrich_process_with_datajud(self, process: Process, *, force: bool = False) -> bool:
+        if not self.datajud_client or (not force and not self._should_refresh_datajud(process)):
+            return False
+        if not force and process.id in self._datajud_checked_process_ids:
+            return False
         self._datajud_checked_process_ids.add(process.id)
 
         try:
@@ -522,10 +620,11 @@ class DjenImporter:
         except Exception as exc:
             self._record_datajud_error(process, exc)
             await self.session.flush()
-            return
+            return True
 
         self._apply_datajud_result(process, result)
         await self.session.flush()
+        return True
 
     def _should_refresh_datajud(self, process: Process) -> bool:
         if process.datajud_status == DATAJUD_STATUS_PENDING or process.datajud_synced_at is None:

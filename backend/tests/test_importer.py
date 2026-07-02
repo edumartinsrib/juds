@@ -19,6 +19,7 @@ from app.utils import (
     CPF_STATUS_ABSENT,
     CPF_STATUS_DIVERGENT,
     CPF_STATUS_PRESENT,
+    format_process_number,
     normalize_cpf,
     normalize_name,
 )
@@ -31,6 +32,13 @@ class FakeDjenClient:
         self.calls = []
 
     async def fetch_comunicacoes(self, **kwargs):
+        self.calls.append(kwargs)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    async def fetch_comunicacoes_por_processo(self, **kwargs):
         self.calls.append(kwargs)
         response = self.responses.pop(0)
         if isinstance(response, Exception):
@@ -345,6 +353,67 @@ async def test_importer_records_datajud_error_without_failing_djen_import(sessio
     assert await session.scalar(select(func.count(Communication.id))) == 1
     assert process.datajud_status == DATAJUD_STATUS_ERROR
     assert process.datajud_error == "DataJud indisponivel"
+
+
+async def test_importer_enriches_process_by_number_with_larger_window(session) -> None:
+    client = Client(name="Joao da Silva", normalized_name=normalize_name("Joao da Silva"), cpf=None)
+    process = Process(
+        numero_processo="00012345620248260100",
+        formatted_number=format_process_number("00012345620248260100"),
+        tribunal="TJSP",
+        datajud_status="pending",
+    )
+    session.add_all([client, process])
+    await session.flush()
+    session.add(
+        ClientProcess(
+            client_id=client.id,
+            process_id=process.id,
+            cpf_status=CPF_STATUS_ABSENT,
+            communications_count=0,
+        )
+    )
+    await session.commit()
+
+    source = {
+        **datajud_source(),
+        "poloAtivo": [{"nome": "Autor DataJud"}],
+        "poloPassivo": [{"nome": "Joao da Silva"}],
+    }
+    fake_datajud = FakeDataJudClient([DataJudSearchResult(alias="tjsp", source=source, total=1)])
+    fake_djen = FakeDjenClient(
+        [
+            DjenPage(
+                items=[djen_item(601)],
+                count=1,
+                rate_limit_limit=100,
+                rate_limit_remaining=98,
+            )
+        ]
+    )
+    importer = DjenImporter(
+        session,
+        fake_djen,
+        datajud_client=fake_datajud,
+        sleep=noop_sleep,
+        rate_limit_sleep_seconds=0,
+    )
+
+    result = await importer.enrich_process_by_number(process, [client])
+    await session.commit()
+
+    assert result.datajud_attempted is True
+    assert result.start_date == date(2024, 1, 10)
+    assert result.djen_items_found == 1
+    assert result.djen_imported == 1
+    assert fake_datajud.calls == [{"numero_processo": "00012345620248260100", "tribunal": "TJSP"}]
+    assert fake_djen.calls[0]["numero_processo"] == "00012345620248260100"
+    assert fake_djen.calls[0]["start_date"] == date(2024, 1, 10)
+    assert await session.scalar(select(func.count(Communication.id))) == 1
+    client_process = (await session.execute(select(ClientProcess))).scalar_one()
+    assert client_process.communications_count == 1
+    assert process.datajud_status == DATAJUD_STATUS_SYNCED
+    assert process.datajud_movements_count == 2
 
 
 async def test_importer_ignores_duplicate_lawyer_links_in_same_communication(session) -> None:

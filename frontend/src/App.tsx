@@ -29,6 +29,7 @@ import {
 import {
   createClient,
   createSearchRun,
+  enrichProcess,
   exportUrl,
   getProcess,
   getSearchRun,
@@ -36,7 +37,15 @@ import {
   listProcesses,
 } from "./api";
 import { cn } from "./lib/cn";
-import type { Client, Communication, ProcessDetail, ProcessListItem, ProcessParty, SearchRun } from "./types";
+import type {
+  Client,
+  Communication,
+  ProcessDetail,
+  ProcessEnrichment,
+  ProcessListItem,
+  ProcessParty,
+  SearchRun,
+} from "./types";
 
 const navItems = [
   { to: "/", label: "Clientes", icon: Users },
@@ -465,9 +474,13 @@ function MovementsView({
   selectedProcessId: string | null;
   onSelectProcess: (processId: string) => void;
 }) {
+  const queryClient = useQueryClient();
   const [typeFilter, setTypeFilter] = useState("");
   const [tribunalFilter, setTribunalFilter] = useState("");
   const [dateFilter, setDateFilter] = useState("");
+  const [enrichmentStartDate, setEnrichmentStartDate] = useState("");
+  const [enrichmentEndDate, setEnrichmentEndDate] = useState("");
+  const [lastEnrichment, setLastEnrichment] = useState<ProcessEnrichment | null>(null);
 
   const processesQuery = useQuery({
     queryKey: ["processes", selectedClient?.id],
@@ -486,6 +499,27 @@ function MovementsView({
     queryKey: ["process", selectedProcessId],
     queryFn: () => getProcess(selectedProcessId!),
     enabled: Boolean(selectedProcessId),
+  });
+
+  useEffect(() => {
+    setLastEnrichment(null);
+    setEnrichmentStartDate("");
+    setEnrichmentEndDate("");
+  }, [selectedProcessId]);
+
+  const enrichMutation = useMutation({
+    mutationFn: () =>
+      enrichProcess(selectedProcessId!, {
+        start_date: enrichmentStartDate || undefined,
+        end_date: enrichmentEndDate || undefined,
+        force_datajud: true,
+    }),
+    onSuccess: (result) => {
+      setLastEnrichment(result);
+      queryClient.setQueryData(["process", result.process.id], result.process);
+      queryClient.invalidateQueries({ queryKey: ["processes"] });
+      queryClient.invalidateQueries({ queryKey: ["clients"] });
+    },
   });
 
   const detail = detailQuery.data ?? null;
@@ -537,7 +571,17 @@ function MovementsView({
         ) : detail ? (
           <div className="v-stack gap-4">
             <ProcessSummary detail={detail} />
-            <DataJudSummary detail={detail} />
+            <DataJudSummary
+              detail={detail}
+              enrichmentStartDate={enrichmentStartDate}
+              enrichmentEndDate={enrichmentEndDate}
+              lastEnrichment={lastEnrichment}
+              isEnriching={enrichMutation.isPending}
+              enrichError={enrichMutation.error}
+              onEnrichmentStartDateChange={setEnrichmentStartDate}
+              onEnrichmentEndDateChange={setEnrichmentEndDate}
+              onEnrich={() => selectedProcessId && enrichMutation.mutate()}
+            />
             <DataJudMovements detail={detail} />
             <div className="grid gap-3 md:grid-cols-3">
               <SelectFilter label="Tipo" value={typeFilter} options={typeOptions} onChange={setTypeFilter} />
@@ -719,16 +763,84 @@ function ProcessSummary({ detail }: { detail: ProcessDetail }) {
   );
 }
 
-function DataJudSummary({ detail }: { detail: ProcessDetail }) {
+function DataJudSummary({
+  detail,
+  enrichmentStartDate,
+  enrichmentEndDate,
+  lastEnrichment,
+  isEnriching,
+  enrichError,
+  onEnrichmentStartDateChange,
+  onEnrichmentEndDateChange,
+  onEnrich,
+}: {
+  detail: ProcessDetail;
+  enrichmentStartDate: string;
+  enrichmentEndDate: string;
+  lastEnrichment: ProcessEnrichment | null;
+  isEnriching: boolean;
+  enrichError: Error | null;
+  onEnrichmentStartDateChange: (value: string) => void;
+  onEnrichmentEndDateChange: (value: string) => void;
+  onEnrich: () => void;
+}) {
   const datajud = detail.datajud;
   return (
     <div className="v-stack gap-3 border-b border-line pb-4">
-      <div className="h-stack flex-wrap items-center gap-2">
-        <h3 className="text-sm font-semibold">DataJud</h3>
-        <DataJudStatusBadge status={datajud.status} />
-        {datajud.alias && <Badge>{datajud.alias}</Badge>}
-        <span className="text-xs text-neutral-600">Sync: {formatDateTime(datajud.synced_at)}</span>
+      <div className="v-stack gap-3 xl:h-stack xl:items-end">
+        <div className="v-stack min-w-0 grow gap-2">
+          <div className="h-stack flex-wrap items-center gap-2">
+            <h3 className="text-sm font-semibold">DataJud</h3>
+            <DataJudStatusBadge status={datajud.status} />
+            {datajud.alias && <Badge>{datajud.alias}</Badge>}
+            <span className="text-xs text-neutral-600">Sync: {formatDateTime(datajud.synced_at)}</span>
+          </div>
+          {lastEnrichment && (
+            <div className="h-stack flex-wrap gap-2 text-xs text-neutral-700">
+              <Badge>DJEN {lastEnrichment.djen_items_found}</Badge>
+              <Badge>Novas {lastEnrichment.djen_imported}</Badge>
+              <Badge>Paginas {lastEnrichment.djen_pages}</Badge>
+              <span>
+                {formatDate(lastEnrichment.start_date)} - {formatDate(lastEnrichment.end_date)}
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="h-stack flex-wrap items-end gap-2">
+          <label className="v-stack gap-1 text-xs font-medium text-neutral-600">
+            Inicio DJEN
+            <input
+              className="ui-input w-36"
+              type="date"
+              value={enrichmentStartDate}
+              onChange={(event) => onEnrichmentStartDateChange(event.target.value)}
+            />
+          </label>
+          <label className="v-stack gap-1 text-xs font-medium text-neutral-600">
+            Fim DJEN
+            <input
+              className="ui-input w-36"
+              type="date"
+              value={enrichmentEndDate}
+              onChange={(event) => onEnrichmentEndDateChange(event.target.value)}
+            />
+          </label>
+          <button
+            className="ui-button ui-button-primary h-stack items-center gap-2"
+            type="button"
+            disabled={isEnriching}
+            onClick={onEnrich}
+          >
+            {isEnriching ? (
+              <Loader2 className="animate-spin" size={17} aria-hidden="true" />
+            ) : (
+              <RefreshCw size={17} aria-hidden="true" />
+            )}
+            Enriquecer
+          </button>
+        </div>
       </div>
+      <MutationError error={enrichError} />
       <div className="grid gap-3 md:grid-cols-4">
         <Metric label="Ajuizamento" value={formatDate(datajud.filed_at)} />
         <Metric label="Ultima Mov." value={formatDateTime(datajud.last_movement_at)} />

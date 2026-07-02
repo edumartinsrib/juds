@@ -53,6 +53,30 @@ class DjenClient:
             "pagina": page,
             "itensPorPagina": itens_por_pagina,
         }
+        return await self._fetch_comunicacoes(params)
+
+    async def fetch_comunicacoes_por_processo(
+        self,
+        *,
+        numero_processo: str,
+        start_date: date,
+        end_date: date,
+        page: int,
+        sigla_tribunal: str | None = None,
+        itens_por_pagina: int = 100,
+    ) -> DjenPage:
+        params = {
+            "numeroProcesso": numero_processo,
+            "dataDisponibilizacaoInicio": start_date.isoformat(),
+            "dataDisponibilizacaoFim": end_date.isoformat(),
+            "pagina": page,
+            "itensPorPagina": itens_por_pagina,
+        }
+        if sigla_tribunal:
+            params["siglaTribunal"] = sigla_tribunal
+        return await self._fetch_comunicacoes(params)
+
+    async def _fetch_comunicacoes(self, params: dict[str, str | int]) -> DjenPage:
         async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
             response = await client.get("/api/v1/comunicacao", params=params)
 

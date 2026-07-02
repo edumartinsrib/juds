@@ -115,3 +115,15 @@ export type ProcessDetail = ProcessListItem & {
   lawyers: Lawyer[];
   timeline: Communication[];
 };
+
+export type ProcessEnrichment = {
+  process: ProcessDetail;
+  start_date: string;
+  end_date: string;
+  datajud_attempted: boolean;
+  djen_items_found: number;
+  djen_imported: number;
+  djen_pages: number;
+  rate_limit_limit: number | null;
+  rate_limit_remaining: number | null;
+};

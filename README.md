@@ -8,6 +8,7 @@ Consulta local de comunicações do DJEN por pessoa com enriquecimento DataJud p
 - Enriquecimento DataJud por `numeroProcesso` nos endpoints públicos `POST /api_publica_{tribunal}/_search`.
 - Persistência de clientes, execuções de busca, processos, comunicações, partes e advogados.
 - Persistência de capa, classe, órgão, assuntos, grau, sistema, sigilo e movimentos DataJud no processo.
+- Enriquecimento processo a processo por número exato, combinando refresh DataJud com busca retroativa no DJEN.
 - CPF é normalizado no backend, mascarado na interface e nunca inferido quando o DJEN não o informa.
 - Texto HTML/XML do DJEN é convertido para texto seguro e o conteúdo bruto é preservado para auditoria.
 - Exportação em CSV e XLSX.
@@ -20,6 +21,7 @@ docker compose up --build
 ```
 
 Configure `DATAJUD_API_KEY` no `.env` local para habilitar o enriquecimento DataJud. O `.env.example` mantém apenas o placeholder da chave.
+`PROCESS_ENRICHMENT_WINDOW_DAYS` define a janela retroativa padrão da busca por número de processo quando a data de ajuizamento DataJud não estiver disponível.
 
 Serviços:
 
@@ -55,5 +57,6 @@ npm run build
 - `GET /api/search-runs/{id}`
 - `GET /api/processes?client_id=...`
 - `GET /api/processes/{id}`
+- `POST /api/processes/{id}/enrich`
 - `GET /api/communications/{id}`
 - `GET /api/exports?client_id=...&format=csv|xlsx`

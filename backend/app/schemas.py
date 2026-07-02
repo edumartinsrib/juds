@@ -57,6 +57,12 @@ class SearchRunRead(BaseModel):
     finished_at: datetime | None
 
 
+class ProcessEnrichmentCreate(BaseModel):
+    start_date: date | None = None
+    end_date: date | None = None
+    force_datajud: bool = True
+
+
 class ProcessPartyRead(BaseModel):
     name: str
     polo: str | None
@@ -150,6 +156,18 @@ class ProcessDetail(ProcessListItem):
     parties: list[PartyRead]
     lawyers: list[LawyerRead]
     timeline: list[CommunicationListItem]
+
+
+class ProcessEnrichmentRead(BaseModel):
+    process: ProcessDetail
+    start_date: date
+    end_date: date
+    datajud_attempted: bool
+    djen_items_found: int
+    djen_imported: int
+    djen_pages: int
+    rate_limit_limit: int | None
+    rate_limit_remaining: int | None
 
 
 def cpf_to_masked(value: str | None) -> str | None:
