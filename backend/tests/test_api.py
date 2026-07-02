@@ -57,10 +57,16 @@ async def test_client_search_run_and_export_flow(session) -> None:
         assert processes[0]["tribunal"] == "TJSP"
         assert processes[0]["cpf_status"] == "presente_no_djen"
         assert processes[0]["datajud_status"] == "pending"
+        assert processes[0]["process_parties"] == [
+            {"name": "Joao da Silva", "polo": "P", "source": "djen"}
+        ]
 
         detail_response = await client.get(f"/api/processes/{processes[0]['id']}")
         detail = detail_response.json()
         assert detail["datajud"]["status"] == "pending"
+        assert detail["process_parties"] == [
+            {"name": "Joao da Silva", "polo": "P", "source": "djen"}
+        ]
         assert detail["timeline"][0]["plain_text"] == "Intimacao com prazo de 10 dias"
         assert detail["lawyers"][0]["name"] == "Maria Advogada"
 

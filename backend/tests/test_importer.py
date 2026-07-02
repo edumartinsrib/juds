@@ -5,7 +5,16 @@ from sqlalchemy import func, select
 from app.datajud import DATAJUD_STATUS_ERROR, DATAJUD_STATUS_SYNCED, DataJudSearchResult
 from app.djen import DjenPage, DjenRateLimitError
 from app.importer import DjenImporter
-from app.models import Client, ClientProcess, Communication, CommunicationParty, Process, SearchRun
+from app.models import (
+    Client,
+    ClientProcess,
+    Communication,
+    CommunicationLawyer,
+    CommunicationParty,
+    Lawyer,
+    Process,
+    SearchRun,
+)
 from app.utils import (
     CPF_STATUS_ABSENT,
     CPF_STATUS_DIVERGENT,
@@ -44,6 +53,14 @@ class FakeDataJudClient:
 
 async def noop_sleep(_: float) -> None:
     return None
+
+
+class SleepRecorder:
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
 
 
 def djen_item(
@@ -121,6 +138,76 @@ async def test_importer_handles_rate_limit_and_deduplicates(session) -> None:
     client_process = (await session.execute(select(ClientProcess))).scalar_one()
     assert client_process.cpf_status == CPF_STATUS_PRESENT
     assert client_process.communications_count == 1
+
+
+async def test_importer_links_existing_communication_to_new_client(session) -> None:
+    first_client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    second_client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    session.add_all([first_client, second_client])
+    await session.flush()
+
+    importer = DjenImporter(session, FakeDjenClient([]), sleep=noop_sleep, rate_limit_sleep_seconds=0)
+    item = djen_item(33)
+
+    first_imported = await importer.import_items(first_client, [item])
+    second_imported = await importer.import_items(second_client, [item])
+    repeated_imported = await importer.import_items(second_client, [item])
+    await session.commit()
+
+    assert first_imported == 1
+    assert second_imported == 0
+    assert repeated_imported == 0
+    assert await session.scalar(select(func.count(Communication.id))) == 1
+    assert await session.scalar(select(func.count(Process.id))) == 1
+    client_processes = (await session.execute(select(ClientProcess))).scalars().all()
+    assert len(client_processes) == 2
+    assert {item.client_id for item in client_processes} == {first_client.id, second_client.id}
+    assert {item.communications_count for item in client_processes} == {1}
+
+
+async def test_importer_waits_before_next_request_when_rate_limit_remaining_is_zero(session) -> None:
+    client = Client(
+        name="Paulo Roberto Guarez",
+        normalized_name=normalize_name("Paulo Roberto Guarez"),
+        cpf=None,
+    )
+    session.add(client)
+    await session.flush()
+    run = SearchRun(
+        client_id=client.id,
+        status="queued",
+        start_date=date(2026, 6, 18),
+        end_date=date(2026, 6, 19),
+        current_page=1,
+    )
+    session.add(run)
+    await session.commit()
+
+    fake = FakeDjenClient(
+        [
+            DjenPage(items=[], count=0, rate_limit_limit=20, rate_limit_remaining=0),
+            DjenPage(items=[], count=0, rate_limit_limit=20, rate_limit_remaining=19),
+        ]
+    )
+    sleep = SleepRecorder()
+    importer = DjenImporter(session, fake, sleep=sleep, rate_limit_sleep_seconds=7)
+
+    completed = await importer.process_run(run.id)
+
+    assert completed.status == "completed"
+    assert completed.error_message is None
+    assert completed.rate_limit_limit == 20
+    assert completed.rate_limit_remaining == 19
+    assert sleep.calls == [7]
+    assert [call["start_date"] for call in fake.calls] == [date(2026, 6, 18), date(2026, 6, 19)]
 
 
 async def test_importer_paginates_by_day(session) -> None:
@@ -258,3 +345,30 @@ async def test_importer_records_datajud_error_without_failing_djen_import(sessio
     assert await session.scalar(select(func.count(Communication.id))) == 1
     assert process.datajud_status == DATAJUD_STATUS_ERROR
     assert process.datajud_error == "DataJud indisponivel"
+
+
+async def test_importer_ignores_duplicate_lawyer_links_in_same_communication(session) -> None:
+    client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    session.add(client)
+    await session.flush()
+
+    item = djen_item(501)
+    item["destinatarioadvogados"].append(item["destinatarioadvogados"][0])
+    importer = DjenImporter(
+        session,
+        FakeDjenClient([]),
+        sleep=noop_sleep,
+        rate_limit_sleep_seconds=0,
+    )
+
+    imported = await importer.import_items(client, [item])
+    await session.commit()
+
+    assert imported == 1
+    assert await session.scalar(select(func.count(Communication.id))) == 1
+    assert await session.scalar(select(func.count(Lawyer.id))) == 1
+    assert await session.scalar(select(func.count(CommunicationLawyer.id))) == 1

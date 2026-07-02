@@ -27,7 +27,7 @@ export function listClients(): Promise<Client[]> {
   return request<Client[]>("/api/clients");
 }
 
-export function createClient(payload: { name: string; cpf?: string }): Promise<Client> {
+export function createClient(payload: { name: string }): Promise<Client> {
   return request<Client>("/api/clients", {
     method: "POST",
     body: JSON.stringify(payload),

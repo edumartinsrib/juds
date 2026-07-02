@@ -1,7 +1,6 @@
 export type Client = {
   id: string;
   name: string;
-  cpf_masked: string | null;
   process_count: number;
   communication_count: number;
   pending_runs: number;
@@ -33,23 +32,27 @@ export type ProcessListItem = {
   process_class: string | null;
   agency: string | null;
   external_link: string | null;
-  cpf_status: string;
   polo: string | null;
   communications_count: number;
   last_movement_at: string | null;
   datajud_status: string;
   datajud_synced_at: string | null;
   datajud_last_movement_at: string | null;
+  process_parties: ProcessParty[];
+};
+
+export type ProcessParty = {
+  name: string;
+  polo: string | null;
+  source: string;
 };
 
 export type Party = {
   id: string;
   communication_id: string;
   name: string;
-  cpf_cnpj_masked: string | null;
   polo: string | null;
   is_client_match: boolean;
-  cpf_status: string;
 };
 
 export type Lawyer = {

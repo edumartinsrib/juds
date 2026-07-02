@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from datetime import datetime
 from io import BytesIO, StringIO
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -35,11 +36,12 @@ from app.schemas import (
     PartyRead,
     ProcessDetail,
     ProcessListItem,
+    ProcessPartyRead,
     SearchRunCreate,
     SearchRunRead,
     cpf_to_masked,
 )
-from app.utils import mask_cpf, normalize_name
+from app.utils import get_first, mask_cpf, normalize_name
 
 router = APIRouter(prefix="/api")
 
@@ -101,6 +103,7 @@ async def list_processes(
     statement = (
         select(Process, ClientProcess)
         .join(ClientProcess, ClientProcess.process_id == Process.id)
+        .options(selectinload(Process.communications).selectinload(Communication.parties))
         .order_by(ClientProcess.last_movement_at.desc().nullslast(), Process.numero_processo.asc())
     )
     if client_id:
@@ -255,7 +258,137 @@ def _process_item(process: Process, client_process: ClientProcess | None) -> Pro
         datajud_status=process.datajud_status or "pending",
         datajud_synced_at=process.datajud_synced_at,
         datajud_last_movement_at=process.datajud_last_movement_at,
+        process_parties=_process_parties(process),
     )
+
+
+def _process_parties(process: Process) -> list[ProcessPartyRead]:
+    parties = [
+        ProcessPartyRead(
+            name=party.name,
+            polo=_normalize_polo(party.polo),
+            source="djen",
+        )
+        for communication in process.communications
+        for party in communication.parties
+        if _to_str(party.name)
+    ]
+    parties.extend(_datajud_process_parties(process.datajud_payload))
+    return _dedupe_process_parties(parties)
+
+
+def _datajud_process_parties(source: dict[str, Any] | None) -> list[ProcessPartyRead]:
+    if not isinstance(source, dict):
+        return []
+    payload = source.get("_source") if isinstance(source.get("_source"), dict) else source
+    parties: list[ProcessPartyRead] = []
+    for key in ("partes", "envolvidos"):
+        parties.extend(_datajud_party_values(payload.get(key), None))
+    for key in ("poloAtivo", "polo_ativo", "ativo"):
+        parties.extend(_datajud_party_values(payload.get(key), "A"))
+    for key in ("poloPassivo", "polo_passivo", "passivo"):
+        parties.extend(_datajud_party_values(payload.get(key), "P"))
+    return _dedupe_process_parties(parties)
+
+
+def _datajud_party_values(value: Any, default_polo: str | None) -> list[ProcessPartyRead]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [
+            party
+            for item in value
+            for party in _datajud_party_values(item, default_polo)
+        ]
+    if isinstance(value, str):
+        name = _to_str(value)
+        return [
+            ProcessPartyRead(name=name, polo=_normalize_polo(default_polo), source="datajud")
+        ] if name else []
+    if not isinstance(value, dict):
+        return []
+
+    polo = _normalize_polo(
+        _to_str(get_first(value, "polo", "tipoPolo", "tipo_polo", "lado")) or default_polo
+    )
+    name = _datajud_party_name(value)
+    if name:
+        return [ProcessPartyRead(name=name, polo=polo, source="datajud")]
+
+    parties: list[ProcessPartyRead] = []
+    for key, key_polo in (
+        ("poloAtivo", "A"),
+        ("polo_ativo", "A"),
+        ("ativo", "A"),
+        ("poloPassivo", "P"),
+        ("polo_passivo", "P"),
+        ("passivo", "P"),
+        ("partes", default_polo),
+        ("envolvidos", default_polo),
+        ("pessoas", default_polo),
+        ("items", default_polo),
+    ):
+        parties.extend(_datajud_party_values(value.get(key), key_polo))
+    return parties
+
+
+def _datajud_party_name(value: dict[str, Any]) -> str | None:
+    direct_name = _to_str(
+        get_first(
+            value,
+            "nome",
+            "name",
+            "nomeParte",
+            "nome_parte",
+            "nomePessoa",
+            "nome_pessoa",
+            "razaoSocial",
+            "razao_social",
+        )
+    )
+    if direct_name:
+        return direct_name
+    for key in ("pessoa", "parte", "pessoaFisica", "pessoaJuridica"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            nested_name = _datajud_party_name(nested)
+            if nested_name:
+                return nested_name
+    return None
+
+
+def _dedupe_process_parties(parties: list[ProcessPartyRead]) -> list[ProcessPartyRead]:
+    by_name: dict[str, ProcessPartyRead] = {}
+    for party in parties:
+        normalized_name = normalize_name(party.name)
+        if not normalized_name:
+            continue
+        current = by_name.get(normalized_name)
+        if current is None or _party_preference(party) < _party_preference(current):
+            by_name[normalized_name] = party
+    return sorted(
+        by_name.values(),
+        key=lambda party: (
+            {"A": 0, "P": 1}.get(party.polo or "", 2),
+            normalize_name(party.name),
+        ),
+    )
+
+
+def _party_preference(party: ProcessPartyRead) -> tuple[int, int]:
+    return (0 if party.polo in {"A", "P"} else 1, 0 if party.source == "djen" else 1)
+
+
+def _normalize_polo(value: str | None) -> str | None:
+    text = _to_str(value)
+    if not text:
+        return None
+    normalized = normalize_name(text)
+    if normalized in {"A", "ATIVO", "POLO ATIVO", "AUTOR", "REQUERENTE", "EXEQUENTE"}:
+        return "A"
+    if normalized in {"P", "PASSIVO", "POLO PASSIVO", "REU", "REQUERIDO", "EXECUTADO"}:
+        return "P"
+    return text
 
 
 def _datajud_read(process: Process) -> DataJudRead:

@@ -36,7 +36,7 @@ import {
   listProcesses,
 } from "./api";
 import { cn } from "./lib/cn";
-import type { Client, Communication, ProcessDetail, ProcessListItem, SearchRun } from "./types";
+import type { Client, Communication, ProcessDetail, ProcessListItem, ProcessParty, SearchRun } from "./types";
 
 const navItems = [
   { to: "/", label: "Clientes", icon: Users },
@@ -192,7 +192,6 @@ function ClientsView({
 }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
-  const [cpf, setCpf] = useState("");
 
   const createClientMutation = useMutation({
     mutationFn: createClient,
@@ -200,7 +199,6 @@ function ClientsView({
       queryClient.invalidateQueries({ queryKey: ["clients"] });
       onSelectClient(client.id);
       setName("");
-      setCpf("");
     },
   });
 
@@ -214,7 +212,7 @@ function ClientsView({
 
   function submitClient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    createClientMutation.mutate({ name, cpf: cpf || undefined });
+    createClientMutation.mutate({ name });
   }
 
   return (
@@ -230,17 +228,6 @@ function ClientsView({
               minLength={3}
               required
               autoComplete="name"
-            />
-          </label>
-          <label className="v-stack gap-1 text-sm font-medium">
-            CPF
-            <input
-              className="ui-input"
-              value={cpf}
-              onChange={(event) => setCpf(event.target.value)}
-              inputMode="numeric"
-              placeholder="Opcional"
-              autoComplete="off"
             />
           </label>
           <button className="ui-button ui-button-primary h-stack items-center gap-2" type="submit">
@@ -298,7 +285,6 @@ function ClientsView({
                   </div>
                   <div className="min-w-0">
                     <p className="truncate font-semibold">{client.name}</p>
-                    <p className="text-sm text-neutral-600">{client.cpf_masked ?? "CPF ausente"}</p>
                   </div>
                 </div>
                 <div className="grid grid-cols-3 gap-2 text-sm">
@@ -348,14 +334,14 @@ function ProcessesView({
         ),
       },
       {
+        header: "Partes",
+        accessorKey: "process_parties",
+        cell: ({ row }) => <ProcessParties parties={row.original.process_parties} compact />,
+      },
+      {
         header: "Tribunal",
         accessorKey: "tribunal",
         cell: ({ row }) => <Badge>{row.original.tribunal ?? "Sem tribunal"}</Badge>,
-      },
-      {
-        header: "CPF",
-        accessorKey: "cpf_status",
-        cell: ({ row }) => <CpfStatusBadge status={row.original.cpf_status} />,
       },
       {
         header: "DataJud",
@@ -431,7 +417,7 @@ function ProcessesView({
           <LoadingState label="Carregando processos" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[880px] border-separate border-spacing-0 text-left text-sm">
+            <table className="w-full min-w-[1040px] border-separate border-spacing-0 text-left text-sm">
               <thead>
                 {table.getHeaderGroups().map((headerGroup) => (
                   <tr key={headerGroup.id}>
@@ -532,9 +518,9 @@ function MovementsView({
             >
               <span className="font-medium">{process.formatted_number}</span>
               <span className="text-xs text-neutral-600">{process.process_class ?? "Classe ausente"}</span>
+              <ProcessParties parties={process.process_parties} compact />
               <div className="h-stack flex-wrap gap-2">
                 <Badge>{process.tribunal ?? "Tribunal ausente"}</Badge>
-                <CpfStatusBadge status={process.cpf_status} />
                 <DataJudStatusBadge status={process.datajud_status} />
               </div>
             </button>
@@ -678,6 +664,8 @@ function RunStatus({ run }: { run: SearchRun | null }) {
     return null;
   }
   const isWorking = run.status === "queued" || run.status === "running";
+  const isWaitingForDjenWindow = isWorking && run.rate_limit_remaining === 0;
+  const shouldShowError = Boolean(run.error_message) && run.status !== "completed" && !isWaitingForDjenWindow;
   return (
     <div className="rounded-md border border-line bg-white p-3 text-sm">
       <div className="h-stack items-center gap-2">
@@ -694,10 +682,12 @@ function RunStatus({ run }: { run: SearchRun | null }) {
         <span>Importadas: {run.total_imported}</span>
         <span>Data: {formatDate(run.current_date)}</span>
       </div>
-      {run.rate_limit_remaining === 0 && (
-        <p className="mt-2 text-warning">DJEN pausou por limite de requisicoes.</p>
+      {isWaitingForDjenWindow && (
+        <p className="mt-2 text-warning">Aguardando nova janela do DJEN para continuar automaticamente.</p>
       )}
-      {run.error_message && <p className="mt-2 text-danger">{run.error_message}</p>}
+      {shouldShowError && (
+        <p className="mt-2 text-danger">{run.error_message}</p>
+      )}
     </div>
   );
 }
@@ -709,9 +699,9 @@ function ProcessSummary({ detail }: { detail: ProcessDetail }) {
       <Metric label="Tribunal" value={detail.tribunal ?? "Ausente"} />
       <Metric label="Movs." value={detail.communications_count} />
       <Metric label="Ultima" value={formatDate(detail.last_movement_at)} />
-      <div className="md:col-span-4">
+      <div className="v-stack gap-2 md:col-span-4">
+        <ProcessParties parties={detail.process_parties} />
         <div className="h-stack flex-wrap gap-2">
-          <CpfStatusBadge status={detail.cpf_status} />
           {detail.external_link && (
             <a
               className="ui-link h-stack items-center gap-1"
@@ -864,18 +854,29 @@ function Metric({ label, value, wide = false }: { label: string; value: ReactNod
   );
 }
 
-function Badge({ children }: { children: ReactNode }) {
-  return <span className="rounded-md border border-line bg-white px-2 py-1 text-xs font-medium">{children}</span>;
+function ProcessParties({ parties, compact = false }: { parties: ProcessParty[]; compact?: boolean }) {
+  if (parties.length === 0) {
+    return <span className="text-xs text-neutral-500">Partes ausentes</span>;
+  }
+  const visibleParties = compact ? parties.slice(0, 4) : parties;
+  return (
+    <div className={cn("v-stack gap-1", { "max-w-[30rem]": compact })}>
+      {visibleParties.map((party) => (
+        <div key={`${party.name}-${party.polo}-${party.source}`} className="h-stack min-w-0 flex-wrap items-center gap-1">
+          <Badge>{poloLabel(party.polo)}</Badge>
+          <span className="min-w-0 break-words text-xs text-neutral-700">{party.name}</span>
+          {!compact && <span className="text-[11px] font-medium uppercase text-neutral-500">{party.source}</span>}
+        </div>
+      ))}
+      {parties.length > visibleParties.length && (
+        <span className="text-xs text-neutral-500">+{parties.length - visibleParties.length} partes</span>
+      )}
+    </div>
+  );
 }
 
-function CpfStatusBadge({ status }: { status: string }) {
-  const style =
-    status === "presente_no_djen"
-      ? "border-emerald-200 bg-emerald-50 text-success"
-      : status === "cpf_divergente"
-        ? "border-red-200 bg-red-50 text-danger"
-        : "border-amber-200 bg-amber-50 text-warning";
-  return <span className={cn("rounded-md border px-2 py-1 text-xs font-semibold", style)}>{cpfLabel(status)}</span>;
+function Badge({ children }: { children: ReactNode }) {
+  return <span className="rounded-md border border-line bg-white px-2 py-1 text-xs font-medium">{children}</span>;
 }
 
 function DataJudStatusBadge({ status }: { status: string }) {
@@ -945,7 +946,7 @@ function HighlightedText({ text, terms }: { text: string; terms: string[] }) {
 function highlightTerms(detail: ProcessDetail, client: Client | null): string[] {
   return [
     client?.name ?? "",
-    client?.cpf_masked ?? "",
+    ...detail.process_parties.map((party) => party.name),
     detail.formatted_number,
     detail.numero_processo,
     "prazo",
@@ -965,14 +966,14 @@ function uniqueOptions(values: Array<string | null | undefined> | undefined): st
   return Array.from(new Set((values ?? []).filter((value): value is string => Boolean(value)))).sort();
 }
 
-function cpfLabel(status: string): string {
-  if (status === "presente_no_djen") {
-    return "CPF presente";
+function poloLabel(polo: string | null | undefined): string {
+  if ((polo ?? "").toUpperCase() === "A") {
+    return "Polo ativo";
   }
-  if (status === "cpf_divergente") {
-    return "CPF divergente";
+  if ((polo ?? "").toUpperCase() === "P") {
+    return "Polo passivo";
   }
-  return "CPF ausente";
+  return "Parte";
 }
 
 function datajudLabel(status: string): string {

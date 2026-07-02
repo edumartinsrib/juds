@@ -57,6 +57,12 @@ class SearchRunRead(BaseModel):
     finished_at: datetime | None
 
 
+class ProcessPartyRead(BaseModel):
+    name: str
+    polo: str | None
+    source: str
+
+
 class ProcessListItem(BaseModel):
     id: str
     numero_processo: str
@@ -72,6 +78,7 @@ class ProcessListItem(BaseModel):
     datajud_status: str
     datajud_synced_at: datetime | None
     datajud_last_movement_at: datetime | None
+    process_parties: list[ProcessPartyRead]
 
 
 class PartyRead(BaseModel):

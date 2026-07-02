@@ -8,6 +8,7 @@ from app.datajud import (
     infer_datajud_alias_from_process_number,
     resolve_datajud_alias,
 )
+from app.api import _datajud_process_parties
 
 
 def datajud_source() -> dict:
@@ -77,3 +78,17 @@ def test_datajud_movements_are_normalized_newest_first() -> None:
 
     assert [movement["nome"] for movement in movements] == ["Conclusao", "Distribuicao"]
     assert movements[0]["data_hora"].isoformat() == "2024-02-15T15:30:00+00:00"
+
+
+def test_datajud_process_parties_are_normalized() -> None:
+    parties = _datajud_process_parties(
+        {
+            "poloAtivo": [{"nome": "Autor Principal"}],
+            "poloPassivo": [{"pessoa": {"nome": "Reu Ltda"}}],
+        }
+    )
+
+    assert [party.model_dump() for party in parties] == [
+        {"name": "Autor Principal", "polo": "A", "source": "datajud"},
+        {"name": "Reu Ltda", "polo": "P", "source": "datajud"},
+    ]

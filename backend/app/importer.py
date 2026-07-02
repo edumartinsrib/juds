@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -48,6 +49,10 @@ from app.utils import (
 )
 
 SleepFunc = Callable[[float], Awaitable[None]]
+logger = logging.getLogger("juds.importer")
+
+DJEN_RATE_LIMIT_MESSAGE = "Rate limit do DJEN; retomando apos pausa."
+DJEN_RATE_LIMIT_WAIT_MESSAGE = "DJEN sem saldo de requisicoes; aguardando nova janela."
 
 
 def default_search_window() -> tuple[date, date]:
@@ -120,6 +125,16 @@ class DjenImporter:
 
         cursor = run.current_date or run.start_date
         page = run.current_page or 1
+        logger.info(
+            "Iniciando busca DJEN run_id=%s client_id=%s nome=%r periodo=%s..%s data_atual=%s pagina=%s",
+            run.id,
+            client.id,
+            client.name,
+            run.start_date,
+            run.end_date,
+            cursor,
+            page,
+        )
         try:
             while cursor <= run.end_date:
                 run.current_date = cursor
@@ -137,14 +152,41 @@ class DjenImporter:
                     except DjenRateLimitError as exc:
                         run.rate_limit_limit = exc.limit
                         run.rate_limit_remaining = exc.remaining
-                        run.error_message = "Rate limit do DJEN; retomando apos pausa."
+                        run.error_message = DJEN_RATE_LIMIT_MESSAGE
                         await self.session.commit()
+                        logger.warning(
+                            "DJEN respondeu 429 run_id=%s client_id=%s nome=%r data=%s pagina=%s "
+                            "limite=%s restante=%s aguardando=%ss",
+                            run.id,
+                            client.id,
+                            client.name,
+                            cursor,
+                            page,
+                            exc.limit,
+                            exc.remaining,
+                            self.rate_limit_sleep_seconds,
+                        )
                         await self.sleep(self.rate_limit_sleep_seconds)
                         continue
 
                     self._record_rate_limit(run, djen_page)
+                    logger.info(
+                        "Pagina DJEN processada run_id=%s client_id=%s nome=%r data=%s pagina=%s "
+                        "itens=%s total_dia=%s limite=%s restante=%s",
+                        run.id,
+                        client.id,
+                        client.name,
+                        cursor,
+                        page,
+                        len(djen_page.items),
+                        djen_page.count,
+                        djen_page.rate_limit_limit,
+                        djen_page.rate_limit_remaining,
+                    )
                     imported = await self.import_items(client, djen_page.items)
                     run.total_imported = (run.total_imported or 0) + imported
+                    if run.error_message in (DJEN_RATE_LIMIT_MESSAGE, DJEN_RATE_LIMIT_WAIT_MESSAGE):
+                        run.error_message = None
                     await self.session.commit()
 
                     if len(djen_page.items) < 100 or page * 100 >= djen_page.count:
@@ -152,26 +194,74 @@ class DjenImporter:
                     page += 1
                     run.current_page = page
 
+                    await self._sleep_if_rate_limit_depleted(run, client, cursor, page)
+
                 cursor += timedelta(days=1)
                 page = 1
+                if cursor <= run.end_date:
+                    await self._sleep_if_rate_limit_depleted(run, client, cursor, page)
 
             run.status = "completed"
             run.current_date = run.end_date
             run.current_page = 1
+            if run.error_message in (DJEN_RATE_LIMIT_MESSAGE, DJEN_RATE_LIMIT_WAIT_MESSAGE):
+                run.error_message = None
             run.finished_at = datetime.now(timezone.utc)
             await self.session.commit()
             await self.session.refresh(run)
+            logger.info(
+                "Busca DJEN concluida run_id=%s client_id=%s nome=%r importadas=%s limite=%s restante=%s",
+                run.id,
+                client.id,
+                client.name,
+                run.total_imported,
+                run.rate_limit_limit,
+                run.rate_limit_remaining,
+            )
             return run
         except Exception as exc:
             run.status = "failed"
             run.error_message = str(exc)
             run.finished_at = datetime.now(timezone.utc)
             await self.session.commit()
+            logger.exception(
+                "Busca DJEN falhou run_id=%s client_id=%s nome=%r data=%s pagina=%s",
+                run.id,
+                client.id,
+                client.name,
+                run.current_date,
+                run.current_page,
+            )
             raise
 
     def _record_rate_limit(self, run: SearchRun, page: DjenPage) -> None:
         run.rate_limit_limit = page.rate_limit_limit
         run.rate_limit_remaining = page.rate_limit_remaining
+
+    async def _sleep_if_rate_limit_depleted(
+        self,
+        run: SearchRun,
+        client: Client,
+        next_date: date,
+        next_page: int,
+    ) -> None:
+        if run.rate_limit_remaining != 0:
+            return
+
+        run.error_message = DJEN_RATE_LIMIT_WAIT_MESSAGE
+        await self.session.commit()
+        logger.info(
+            "DJEN informou saldo zero; pausa preventiva run_id=%s client_id=%s nome=%r "
+            "proxima_data=%s proxima_pagina=%s limite=%s aguardando=%ss",
+            run.id,
+            client.id,
+            client.name,
+            next_date,
+            next_page,
+            run.rate_limit_limit,
+            self.rate_limit_sleep_seconds,
+        )
+        await self.sleep(self.rate_limit_sleep_seconds)
 
     async def import_items(self, client: Client, items: list[dict[str, Any]]) -> int:
         imported = 0
@@ -180,7 +270,16 @@ class DjenImporter:
             if communication:
                 process = await self.session.get(Process, communication.process_id)
                 if process:
+                    cpf_status, polo = self._classify_client_in_item(client, item)
+                    await self._upsert_client_process(
+                        client,
+                        process,
+                        communication.data_disponibilizacao,
+                        cpf_status,
+                        polo,
+                    )
                     await self._maybe_enrich_process_with_datajud(process)
+                    await self.session.flush()
                 continue
             await self._create_communication(client, item)
             imported += 1
@@ -271,8 +370,7 @@ class DjenImporter:
         self, client: Client, communication: Communication, item: dict[str, Any]
     ) -> tuple[str, str | None]:
         parties = item.get("destinatarios") or []
-        status = CPF_STATUS_ABSENT
-        matched_polo: str | None = None
+        status, matched_polo = self._classify_client_in_item(client, item)
 
         for party in parties:
             name = _to_str(get_first(party, "nome", "nomeParte", "nome_parte")) or ""
@@ -299,8 +397,27 @@ class DjenImporter:
             )
         return status, matched_polo
 
+    def _classify_client_in_item(self, client: Client, item: dict[str, Any]) -> tuple[str, str | None]:
+        status = CPF_STATUS_ABSENT
+        matched_polo: str | None = None
+
+        parties = item.get("destinatarios") or []
+        for party in parties:
+            name = _to_str(get_first(party, "nome", "nomeParte", "nome_parte")) or ""
+            if not name:
+                continue
+            if not party_matches_client(client.name, name):
+                continue
+            cpf_cnpj = normalize_document(
+                _to_str(get_first(party, "cpf_cnpj", "cpfCnpj", "documento", "cpf"))
+            )
+            status = merge_cpf_status(status, classify_party_cpf(client.cpf, cpf_cnpj))
+            matched_polo = matched_polo or _to_str(get_first(party, "polo"))
+        return status, matched_polo
+
     async def _create_lawyers(self, communication: Communication, item: dict[str, Any]) -> None:
         raw_lawyers = item.get("destinatarioadvogados") or item.get("advogados") or []
+        linked_lawyer_ids: set[str] = set()
         for entry in raw_lawyers:
             lawyer_payload = entry.get("advogado") if isinstance(entry, dict) else None
             lawyer_payload = lawyer_payload or entry
@@ -312,6 +429,15 @@ class DjenImporter:
             oab_number = _to_str(get_first(lawyer_payload, "numero_oab", "numeroOab", "oab"))
             oab_state = _to_str(get_first(lawyer_payload, "uf_oab", "ufOab"))
             lawyer = await self._get_or_create_lawyer(name, oab_number, oab_state)
+            if lawyer.id in linked_lawyer_ids:
+                logger.info(
+                    "Advogado duplicado ignorado na comunicacao communication_id=%s lawyer_id=%s nome=%r",
+                    communication.id,
+                    lawyer.id,
+                    name,
+                )
+                continue
+            linked_lawyer_ids.add(lawyer.id)
             self.session.add(CommunicationLawyer(communication_id=communication.id, lawyer_id=lawyer.id))
 
     async def _get_or_create_lawyer(
@@ -349,13 +475,14 @@ class DjenImporter:
             )
         )
         client_process = result.scalar_one_or_none()
+        communications_count = await self._count_process_communications(process.id)
         if client_process is None:
             client_process = ClientProcess(
                 client_id=client.id,
                 process_id=process.id,
                 cpf_status=cpf_status,
                 polo=polo,
-                communications_count=1,
+                communications_count=communications_count,
                 last_movement_at=movement_date,
             )
             self.session.add(client_process)
@@ -363,10 +490,16 @@ class DjenImporter:
 
         client_process.cpf_status = merge_cpf_status(client_process.cpf_status, cpf_status)
         client_process.polo = client_process.polo or polo
-        client_process.communications_count += 1
+        client_process.communications_count = communications_count
         if client_process.last_movement_at is None or movement_date > client_process.last_movement_at:
             client_process.last_movement_at = movement_date
         return client_process
+
+    async def _count_process_communications(self, process_id: str) -> int:
+        count = await self.session.scalar(
+            select(func.count(Communication.id)).where(Communication.process_id == process_id)
+        )
+        return int(count or 0)
 
     def _process_number_from_item(self, item: dict[str, Any]) -> str:
         raw_process_number = _to_str(
