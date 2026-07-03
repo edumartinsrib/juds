@@ -6,6 +6,10 @@ import {
   ArrowRight,
   BriefcaseBusiness,
   CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   CheckCircle2,
   Clock3,
   Cpu,
@@ -16,6 +20,7 @@ import {
   Gavel,
   ListFilter,
   Loader2,
+  Pencil,
   Plus,
   Power,
   RefreshCw,
@@ -29,6 +34,7 @@ import {
   Tags,
   Trash2,
   Users,
+  X,
 } from "lucide-react";
 import {
   ColumnDef,
@@ -41,6 +47,7 @@ import {
   createClient,
   createRiskKeyword,
   createSearchRun,
+  deleteClient,
   deleteRiskKeyword,
   enrichProcess,
   exportUrl,
@@ -48,16 +55,18 @@ import {
   getSearchRun,
   getWorkerDashboard,
   listClients,
-  listProcesses,
+  listProcessesPage,
   listRiskKeywords,
   reprocessRiskKeywords,
   startWorker,
   stopWorker,
+  updateClient,
   updateRiskKeyword,
 } from "./api";
 import { cn } from "./lib/cn";
 import type {
   Client,
+  ClientPayload,
   Communication,
   ProcessDetail,
   ProcessEnrichment,
@@ -90,6 +99,36 @@ const riskLevelOptions: Array<{ value: RiskLevel; label: string }> = [
   { value: "critico", label: "Critico" },
 ];
 
+const pageSizeOptions = [5, 8, 9, 10, 20, 50];
+
+type SearchPeriodPreset = "last_7" | "last_30" | "last_90" | "current_month" | "custom";
+
+type MovementSearchOptions = {
+  startDate: string;
+  endDate: string;
+  analyzeRisks: boolean;
+  openMovementsWhenDone: boolean;
+};
+
+type MovementSearchForm = MovementSearchOptions & {
+  preset: SearchPeriodPreset;
+};
+
+type RiskAutomationState = {
+  runId: string | null;
+  status: "idle" | "pending" | "running" | "completed" | "failed";
+  result: RiskReprocess | null;
+  error: string | null;
+};
+
+const searchPeriodOptions: Array<{ value: SearchPeriodPreset; label: string }> = [
+  { value: "last_7", label: "Ultimos 7 dias" },
+  { value: "last_30", label: "Ultimos 30 dias" },
+  { value: "last_90", label: "Ultimos 90 dias" },
+  { value: "current_month", label: "Mes atual" },
+  { value: "custom", label: "Personalizado" },
+];
+
 const emptyWorkerDashboard: WorkerDashboard = {
   workers: [],
   active_workers: 0,
@@ -103,14 +142,23 @@ const emptyWorkerDashboard: WorkerDashboard = {
 
 export default function App() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [selectedProcessId, setSelectedProcessId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [activeSearchOptions, setActiveSearchOptions] = useState<MovementSearchOptions | null>(null);
+  const [completionHandledRunId, setCompletionHandledRunId] = useState<string | null>(null);
+  const [riskAutomation, setRiskAutomation] = useState<RiskAutomationState>({
+    runId: null,
+    status: "idle",
+    result: null,
+    error: null,
+  });
 
   const clientsQuery = useQuery({ queryKey: ["clients"], queryFn: listClients });
   const clients = clientsQuery.data ?? [];
 
-  function handleSelectClient(clientId: string) {
+  function handleSelectClient(clientId: string | null) {
     setSelectedClientId(clientId);
     setSelectedProcessId(null);
   }
@@ -133,13 +181,73 @@ export default function App() {
     },
   });
 
-  useEffect(() => {
-    const status = runQuery.data?.status;
-    if (status === "completed") {
-      queryClient.invalidateQueries({ queryKey: ["clients"] });
+  const riskAutomationMutation = useMutation({
+    mutationFn: reprocessRiskKeywords,
+    onSuccess: (result) => {
+      setRiskAutomation((current) => ({
+        ...current,
+        status: "completed",
+        result,
+        error: null,
+      }));
+      queryClient.invalidateQueries({ queryKey: ["risk-keywords"] });
+      queryClient.invalidateQueries({ queryKey: ["process"] });
       queryClient.invalidateQueries({ queryKey: ["processes"] });
+      queryClient.invalidateQueries({ queryKey: ["processes-page"] });
+    },
+    onError: (error) => {
+      setRiskAutomation((current) => ({
+        ...current,
+        status: "failed",
+        error: error.message,
+      }));
+    },
+  });
+
+  useEffect(() => {
+    const run = runQuery.data;
+    if (!run || run.status !== "completed" || completionHandledRunId === run.id) {
+      return;
     }
-  }, [queryClient, runQuery.data?.status]);
+
+    setCompletionHandledRunId(run.id);
+    queryClient.invalidateQueries({ queryKey: ["clients"] });
+    queryClient.invalidateQueries({ queryKey: ["processes"] });
+    queryClient.invalidateQueries({ queryKey: ["processes-page"] });
+
+    if (activeSearchOptions?.openMovementsWhenDone) {
+      navigate("/movimentacoes");
+    }
+
+    if (activeSearchOptions?.analyzeRisks) {
+      setRiskAutomation({
+        runId: run.id,
+        status: "running",
+        result: null,
+        error: null,
+      });
+      riskAutomationMutation.mutate();
+    }
+  }, [
+    activeSearchOptions,
+    completionHandledRunId,
+    navigate,
+    queryClient,
+    riskAutomationMutation,
+    runQuery.data,
+  ]);
+
+  function handleRunCreated(runId: string, options: MovementSearchOptions) {
+    setActiveRunId(runId);
+    setActiveSearchOptions(options);
+    setCompletionHandledRunId(null);
+    setRiskAutomation({
+      runId,
+      status: options.analyzeRisks ? "pending" : "idle",
+      result: null,
+      error: null,
+    });
+  }
 
   return (
     <main className="min-h-screen bg-paper text-ink">
@@ -185,9 +293,11 @@ export default function App() {
                 selectedClient={selectedClient}
                 selectedClientId={selectedClientId}
                 activeRun={runQuery.data ?? null}
+                activeSearchOptions={activeSearchOptions}
+                riskAutomation={riskAutomation}
                 clientsLoading={clientsQuery.isLoading}
                 onSelectClient={handleSelectClient}
-                onRunCreated={setActiveRunId}
+                onRunCreated={handleRunCreated}
               />
             }
           />
@@ -236,6 +346,8 @@ function ClientsView({
   selectedClient,
   selectedClientId,
   activeRun,
+  activeSearchOptions,
+  riskAutomation,
   clientsLoading,
   onSelectClient,
   onRunCreated,
@@ -244,50 +356,104 @@ function ClientsView({
   selectedClient: Client | null;
   selectedClientId: string | null;
   activeRun: SearchRun | null;
+  activeSearchOptions: MovementSearchOptions | null;
+  riskAutomation: RiskAutomationState;
   clientsLoading: boolean;
-  onSelectClient: (clientId: string) => void;
-  onRunCreated: (runId: string) => void;
+  onSelectClient: (clientId: string | null) => void;
+  onRunCreated: (runId: string, options: MovementSearchOptions) => void;
 }) {
   const queryClient = useQueryClient();
-  const [name, setName] = useState("");
+  const [form, setForm] = useState<ClientPayload>(defaultClientForm);
+  const [editingClientId, setEditingClientId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<ClientPayload>(defaultClientForm);
+  const [searchModalOpen, setSearchModalOpen] = useState(false);
+  const clientPagination = usePaginatedItems(clients, 9);
 
   const createClientMutation = useMutation({
     mutationFn: createClient,
     onSuccess: (client) => {
       queryClient.invalidateQueries({ queryKey: ["clients"] });
       onSelectClient(client.id);
-      setName("");
+      setForm(defaultClientForm());
+    },
+  });
+
+  const updateClientMutation = useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: Partial<ClientPayload> }) =>
+      updateClient(id, payload),
+    onSuccess: (updatedClient) => {
+      queryClient.setQueryData<Client[]>(["clients"], (current) =>
+        current?.map((client) => (client.id === updatedClient.id ? updatedClient : client)),
+      );
+      queryClient.invalidateQueries({ queryKey: ["clients"] });
+      setEditingClientId(null);
+    },
+  });
+
+  const deleteClientMutation = useMutation({
+    mutationFn: deleteClient,
+    onSuccess: (deletedClient) => {
+      const remainingClients = clients.filter((client) => client.id !== deletedClient.id);
+      queryClient.setQueryData<Client[]>(["clients"], remainingClients);
+      queryClient.invalidateQueries({ queryKey: ["clients"] });
+      queryClient.invalidateQueries({ queryKey: ["processes"] });
+      queryClient.invalidateQueries({ queryKey: ["processes-page"] });
+      if (selectedClientId === deletedClient.id) {
+        onSelectClient(remainingClients[0]?.id ?? null);
+      }
+      setEditingClientId(null);
     },
   });
 
   const searchMutation = useMutation({
-    mutationFn: (clientId: string) => createSearchRun(clientId),
-    onSuccess: (run) => {
-      onRunCreated(run.id);
+    mutationFn: ({
+      clientId,
+      options,
+    }: {
+      clientId: string;
+      options: MovementSearchOptions;
+    }) =>
+      createSearchRun(clientId, {
+        start_date: options.startDate,
+        end_date: options.endDate,
+      }),
+    onSuccess: (run, variables) => {
+      onRunCreated(run.id, variables.options);
+      setSearchModalOpen(false);
       queryClient.invalidateQueries({ queryKey: ["clients"] });
     },
   });
 
   function submitClient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    createClientMutation.mutate({ name });
+    createClientMutation.mutate(normalizeClientPayload(form));
+  }
+
+  function startClientEdit(client: Client) {
+    setEditingClientId(client.id);
+    setEditForm({ name: client.name, cpf: "" });
+  }
+
+  function submitClientEdit(event: FormEvent<HTMLFormElement>, clientId: string) {
+    event.preventDefault();
+    updateClientMutation.mutate({
+      id: clientId,
+      payload: normalizeClientUpdatePayload(editForm),
+    });
+  }
+
+  function confirmClientDelete(client: Client) {
+    const confirmed = window.confirm(`Excluir o cliente "${client.name}"?`);
+    if (confirmed) {
+      deleteClientMutation.mutate(client.id);
+    }
   }
 
   return (
     <section className="grid gap-4 py-5 lg:grid-cols-[minmax(320px,380px)_1fr]">
       <Panel title="Cliente" icon={<Users size={18} />}>
         <form className="v-stack gap-3" onSubmit={submitClient}>
-          <label className="v-stack gap-1 text-sm font-medium">
-            Nome
-            <input
-              className="ui-input"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              minLength={3}
-              required
-              autoComplete="name"
-            />
-          </label>
+          <ClientFields value={form} onChange={setForm} />
           <button className="ui-button ui-button-primary h-stack items-center gap-2" type="submit">
             {createClientMutation.isPending ? (
               <Loader2 className="animate-spin" size={17} aria-hidden="true" />
@@ -309,7 +475,7 @@ function ClientsView({
             className="ui-button h-stack items-center gap-2"
             type="button"
             disabled={!selectedClient || searchMutation.isPending}
-            onClick={() => selectedClient && searchMutation.mutate(selectedClient.id)}
+            onClick={() => selectedClient && setSearchModalOpen(true)}
           >
             {searchMutation.isPending ? (
               <Loader2 className="animate-spin" size={17} aria-hidden="true" />
@@ -319,42 +485,132 @@ function ClientsView({
             Buscar movimentacoes
           </button>
           <MutationError error={searchMutation.error} />
-          <RunStatus run={activeRun} />
+          <RunStatus
+            run={activeRun}
+            options={activeSearchOptions}
+            riskAutomation={riskAutomation}
+          />
         </div>
       </Panel>
 
       <Panel title="Carteira" icon={<BriefcaseBusiness size={18} />}>
         {clientsLoading ? (
           <LoadingState label="Carregando clientes" />
+        ) : clients.length === 0 ? (
+          <EmptyState label="Cadastre o primeiro cliente para iniciar as buscas." />
         ) : (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {clients.map((client) => (
-              <button
-                key={client.id}
-                type="button"
-                className={cn("ui-card v-stack gap-3 text-left", {
-                  "ring-2 ring-brand-500": selectedClientId === client.id,
-                })}
-                onClick={() => onSelectClient(client.id)}
-              >
-                <div className="h-stack items-start gap-3">
-                  <div className="center h-9 w-9 shrink-0 rounded-md bg-brand-50 text-brand-700">
-                    <Users size={17} aria-hidden="true" />
-                  </div>
-                  <div className="min-w-0">
-                    <p className="truncate font-semibold">{client.name}</p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-2 text-sm">
-                  <Metric label="Processos" value={client.process_count} />
-                  <Metric label="Movs." value={client.communication_count} />
-                  <Metric label="Filas" value={client.pending_runs} />
-                </div>
-              </button>
-            ))}
+          <div className="v-stack gap-3">
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {clientPagination.items.map((client) => {
+                const isEditing = editingClientId === client.id;
+                const isSelected = selectedClientId === client.id;
+                return isEditing ? (
+                  <form
+                    key={client.id}
+                    className={cn("ui-card v-stack gap-3", {
+                      "ring-2 ring-brand-500": isSelected,
+                    })}
+                    onSubmit={(event) => submitClientEdit(event, client.id)}
+                  >
+                    <ClientFields
+                      value={editForm}
+                      onChange={setEditForm}
+                      cpfPlaceholder={client.cpf_masked ?? "CPF opcional"}
+                      cpfHint="Preencha somente se quiser alterar o CPF."
+                    />
+                    <div className="h-stack flex-wrap gap-2">
+                      <button
+                        className="ui-button ui-button-primary h-stack items-center gap-2"
+                        type="submit"
+                        disabled={updateClientMutation.isPending}
+                      >
+                        {updateClientMutation.isPending ? (
+                          <Loader2 className="animate-spin" size={17} aria-hidden="true" />
+                        ) : (
+                          <Save size={17} aria-hidden="true" />
+                        )}
+                        Salvar
+                      </button>
+                      <button className="ui-button" type="button" onClick={() => setEditingClientId(null)}>
+                        Cancelar
+                      </button>
+                    </div>
+                    <MutationError error={updateClientMutation.error} />
+                  </form>
+                ) : (
+                  <article
+                    key={client.id}
+                    className={cn("ui-card v-stack gap-3", {
+                      "ring-2 ring-brand-500": isSelected,
+                    })}
+                  >
+                    <div className="h-stack items-start gap-3">
+                      <button
+                        className="h-stack min-w-0 grow appearance-none items-start gap-3 border-0 bg-transparent p-0 text-left text-ink"
+                        type="button"
+                        onClick={() => onSelectClient(client.id)}
+                      >
+                        <div className="center h-9 w-9 shrink-0 rounded-md bg-brand-50 text-brand-700">
+                          <Users size={17} aria-hidden="true" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="truncate font-semibold">{client.name}</p>
+                          <p className="mt-1 text-xs text-neutral-600">
+                            {client.cpf_masked ?? "CPF nao informado"}
+                          </p>
+                        </div>
+                      </button>
+                      <div className="h-stack shrink-0 gap-2">
+                        <button
+                          className="ui-icon-button"
+                          type="button"
+                          title="Editar cliente"
+                          onClick={() => startClientEdit(client)}
+                        >
+                          <Pencil size={15} aria-hidden="true" />
+                        </button>
+                        <button
+                          className="ui-icon-button text-danger hover:text-danger"
+                          type="button"
+                          title="Excluir cliente"
+                          disabled={deleteClientMutation.isPending}
+                          onClick={() => confirmClientDelete(client)}
+                        >
+                          <Trash2 size={15} aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-sm">
+                      <Metric label="Processos" value={client.process_count} />
+                      <Metric label="Movs." value={client.communication_count} />
+                      <Metric label="Filas" value={client.pending_runs} />
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+            <PaginationControls
+              page={clientPagination.page}
+              pageCount={clientPagination.pageCount}
+              pageSize={clientPagination.pageSize}
+              totalItems={clientPagination.totalItems}
+              itemLabel="clientes"
+              onPageChange={clientPagination.setPage}
+              onPageSizeChange={clientPagination.setPageSize}
+            />
+            <MutationError error={deleteClientMutation.error} />
           </div>
         )}
       </Panel>
+      {searchModalOpen && selectedClient && (
+        <MovementSearchModal
+          client={selectedClient}
+          isSubmitting={searchMutation.isPending}
+          error={searchMutation.error}
+          onClose={() => setSearchModalOpen(false)}
+          onSubmit={(options) => searchMutation.mutate({ clientId: selectedClient.id, options })}
+        />
+      )}
     </section>
   );
 }
@@ -369,29 +625,37 @@ function ProcessesView({
   clients: Client[];
   selectedClientId: string | null;
   selectedProcessId: string | null;
-  onSelectClient: (clientId: string) => void;
+  onSelectClient: (clientId: string | null) => void;
   onSelectProcess: (processId: string) => void;
 }) {
   const navigate = useNavigate();
   const [riskFilter, setRiskFilter] = useState("todos");
+  const [processPage, setProcessPage] = useState(1);
+  const [processPageSize, setProcessPageSize] = useState(10);
+
+  useEffect(() => {
+    setProcessPage(1);
+  }, [processPageSize, riskFilter, selectedClientId]);
+
   const processesQuery = useQuery({
-    queryKey: ["processes", selectedClientId],
-    queryFn: () => listProcesses(selectedClientId),
+    queryKey: ["processes-page", selectedClientId, riskFilter, processPage, processPageSize],
+    queryFn: () =>
+      listProcessesPage({
+        clientId: selectedClientId,
+        riskFilter,
+        page: processPage,
+        pageSize: processPageSize,
+      }),
     enabled: Boolean(selectedClientId),
   });
-  const filteredProcesses = useMemo(() => {
-    const processes = processesQuery.data ?? [];
-    if (riskFilter === "todos") {
-      return processes;
+  const processPageData = processesQuery.data ?? null;
+  const processes = processPageData?.items ?? [];
+
+  useEffect(() => {
+    if (processPageData && processPage > processPageData.total_pages) {
+      setProcessPage(processPageData.total_pages);
     }
-    if (riskFilter === "com_risco") {
-      return processes.filter((process) => process.risk_matches_count > 0);
-    }
-    if (riskFilter === "sem_risco") {
-      return processes.filter((process) => process.risk_matches_count === 0);
-    }
-    return processes.filter((process) => process.highest_risk_level === riskFilter);
-  }, [processesQuery.data, riskFilter]);
+  }, [processPage, processPageData]);
 
   const columns = useMemo<ColumnDef<ProcessListItem>[]>(
     () => [
@@ -459,7 +723,7 @@ function ProcessesView({
   );
 
   const table = useReactTable({
-    data: filteredProcesses,
+    data: processes,
     columns,
     getCoreRowModel: getCoreRowModel(),
   });
@@ -535,10 +799,21 @@ function ProcessesView({
                 ))}
               </tbody>
             </table>
-            {filteredProcesses.length === 0 && (
+            {processes.length === 0 && (
               <EmptyState label="Nenhum processo importado para o cliente selecionado." />
             )}
           </div>
+        )}
+        {processPageData && processPageData.total > 0 && (
+          <PaginationControls
+            page={processPageData.page}
+            pageCount={processPageData.total_pages}
+            pageSize={processPageData.page_size}
+            totalItems={processPageData.total}
+            itemLabel="processos"
+            onPageChange={setProcessPage}
+            onPageSizeChange={setProcessPageSize}
+          />
         )}
       </Panel>
     </section>
@@ -562,19 +837,38 @@ function MovementsView({
   const [enrichmentStartDate, setEnrichmentStartDate] = useState("");
   const [enrichmentEndDate, setEnrichmentEndDate] = useState("");
   const [lastEnrichment, setLastEnrichment] = useState<ProcessEnrichment | null>(null);
+  const [processListPage, setProcessListPage] = useState(1);
+  const [processListPageSize, setProcessListPageSize] = useState(10);
 
   const processesQuery = useQuery({
-    queryKey: ["processes", selectedClient?.id],
-    queryFn: () => listProcesses(selectedClient?.id),
+    queryKey: ["processes-page", "movements", selectedClient?.id, processListPage, processListPageSize],
+    queryFn: () =>
+      listProcessesPage({
+        clientId: selectedClient?.id,
+        riskFilter: "todos",
+        page: processListPage,
+        pageSize: processListPageSize,
+      }),
     enabled: Boolean(selectedClient?.id),
   });
+  const processListPageData = processesQuery.data ?? null;
+  const processListItems = processListPageData?.items ?? [];
 
   useEffect(() => {
-    const processes = processesQuery.data ?? [];
-    if (!selectedProcessId && processes.length > 0) {
-      onSelectProcess(processes[0].id);
+    setProcessListPage(1);
+  }, [processListPageSize, selectedClient?.id]);
+
+  useEffect(() => {
+    if (processListPageData && processListPage > processListPageData.total_pages) {
+      setProcessListPage(processListPageData.total_pages);
     }
-  }, [onSelectProcess, processesQuery.data, selectedProcessId]);
+  }, [processListPage, processListPageData]);
+
+  useEffect(() => {
+    if (!selectedProcessId && processListItems.length > 0) {
+      onSelectProcess(processListItems[0].id);
+    }
+  }, [onSelectProcess, processListItems, selectedProcessId]);
 
   const detailQuery = useQuery({
     queryKey: ["process", selectedProcessId],
@@ -599,6 +893,7 @@ function MovementsView({
       setLastEnrichment(result);
       queryClient.setQueryData(["process", result.process.id], result.process);
       queryClient.invalidateQueries({ queryKey: ["processes"] });
+      queryClient.invalidateQueries({ queryKey: ["processes-page"] });
       queryClient.invalidateQueries({ queryKey: ["clients"] });
     },
   });
@@ -618,6 +913,7 @@ function MovementsView({
       return byType && byTribunal && byDate && byRisk;
     });
   }, [dateFilter, detail?.timeline, riskFilter, tribunalFilter, typeFilter]);
+  const movementPagination = usePaginatedItems(filteredTimeline, 5);
 
   const typeOptions = uniqueOptions(detail?.timeline.map((item) => item.tipo_comunicacao));
   const tribunalOptions = uniqueOptions(detail?.timeline.map((item) => item.sigla_tribunal));
@@ -626,28 +922,39 @@ function MovementsView({
   return (
     <section className="grid gap-4 py-5 lg:grid-cols-[320px_1fr]">
       <Panel title="Processos" icon={<BriefcaseBusiness size={18} />}>
-        <div className="v-stack max-h-[calc(100vh-210px)] gap-2 overflow-y-auto pr-1">
-          {(processesQuery.data ?? []).map((process) => (
-            <button
-              key={process.id}
-              type="button"
-              className={cn("ui-list-item v-stack gap-2 text-left", {
-                "border-brand-500 bg-brand-50": selectedProcessId === process.id,
-              })}
-              onClick={() => onSelectProcess(process.id)}
-            >
-              <span className="font-medium">{process.formatted_number}</span>
-              <span className="text-xs text-neutral-600">{process.process_class ?? "Classe ausente"}</span>
-              <ProcessParties parties={process.process_parties} compact />
-              <div className="h-stack flex-wrap gap-2">
-                <Badge>{process.tribunal ?? "Tribunal ausente"}</Badge>
-                <ProcessDataStatusBadge status={process.datajud_status} />
-                <ProcessRiskSummary process={process} compact />
-              </div>
-            </button>
-          ))}
-          {(processesQuery.data ?? []).length === 0 && (
-            <EmptyState label="Nenhum processo disponivel." />
+        <div className="v-stack gap-3">
+          <div className="v-stack max-h-[calc(100vh-280px)] gap-2 overflow-y-auto pr-1">
+            {processListItems.map((process) => (
+              <button
+                key={process.id}
+                type="button"
+                className={cn("ui-list-item v-stack gap-2 text-left", {
+                  "border-brand-500 bg-brand-50": selectedProcessId === process.id,
+                })}
+                onClick={() => onSelectProcess(process.id)}
+              >
+                <span className="font-medium">{process.formatted_number}</span>
+                <span className="text-xs text-neutral-600">{process.process_class ?? "Classe ausente"}</span>
+                <ProcessParties parties={process.process_parties} compact />
+                <div className="h-stack flex-wrap gap-2">
+                  <Badge>{process.tribunal ?? "Tribunal ausente"}</Badge>
+                  <ProcessDataStatusBadge status={process.datajud_status} />
+                  <ProcessRiskSummary process={process} compact />
+                </div>
+              </button>
+            ))}
+            {processListItems.length === 0 && <EmptyState label="Nenhum processo disponivel." />}
+          </div>
+          {processListPageData && processListPageData.total > 0 && (
+            <PaginationControls
+              page={processListPageData.page}
+              pageCount={processListPageData.total_pages}
+              pageSize={processListPageData.page_size}
+              totalItems={processListPageData.total}
+              itemLabel="processos"
+              onPageChange={setProcessListPage}
+              onPageSizeChange={setProcessListPageSize}
+            />
           )}
         </div>
       </Panel>
@@ -686,7 +993,7 @@ function MovementsView({
                 <h3 className="text-sm font-semibold">Movimentacoes</h3>
                 <Badge>{filteredTimeline.length}</Badge>
               </div>
-              {filteredTimeline.map((communication) => (
+              {movementPagination.items.map((communication) => (
                 <TimelineItem
                   key={communication.id}
                   communication={communication}
@@ -694,6 +1001,17 @@ function MovementsView({
                 />
               ))}
               {filteredTimeline.length === 0 && <EmptyState label="Nenhuma movimentacao neste filtro." />}
+              {filteredTimeline.length > 0 && (
+                <PaginationControls
+                  page={movementPagination.page}
+                  pageCount={movementPagination.pageCount}
+                  pageSize={movementPagination.pageSize}
+                  totalItems={movementPagination.totalItems}
+                  itemLabel="movimentacoes"
+                  onPageChange={movementPagination.setPage}
+                  onPageSizeChange={movementPagination.setPageSize}
+                />
+              )}
             </div>
           </div>
         ) : (
@@ -715,10 +1033,12 @@ function RiskManagementView() {
   const keywords = keywordsQuery.data ?? [];
   const activeCount = keywords.filter((keyword) => keyword.active).length;
   const totalMatches = keywords.reduce((total, keyword) => total + keyword.match_count, 0);
+  const keywordPagination = usePaginatedItems(keywords, 8);
 
   function invalidateRiskData() {
     queryClient.invalidateQueries({ queryKey: ["risk-keywords"] });
     queryClient.invalidateQueries({ queryKey: ["processes"] });
+    queryClient.invalidateQueries({ queryKey: ["processes-page"] });
     queryClient.invalidateQueries({ queryKey: ["process"] });
   }
 
@@ -831,7 +1151,7 @@ function RiskManagementView() {
           <EmptyState label="Cadastre a primeira palavra para classificar movimentacoes." />
         ) : (
           <div className="v-stack gap-3">
-            {keywords.map((keyword) => {
+            {keywordPagination.items.map((keyword) => {
               const isEditing = editingId === keyword.id;
               return (
                 <article key={keyword.id} className="ui-list-item v-stack gap-3">
@@ -902,6 +1222,15 @@ function RiskManagementView() {
                 </article>
               );
             })}
+            <PaginationControls
+              page={keywordPagination.page}
+              pageCount={keywordPagination.pageCount}
+              pageSize={keywordPagination.pageSize}
+              totalItems={keywordPagination.totalItems}
+              itemLabel="riscos"
+              onPageChange={keywordPagination.setPage}
+              onPageSizeChange={keywordPagination.setPageSize}
+            />
           </div>
         )}
       </Panel>
@@ -1058,7 +1387,7 @@ function ExportsView({
 }: {
   clients: Client[];
   selectedClientId: string | null;
-  onSelectClient: (clientId: string) => void;
+  onSelectClient: (clientId: string | null) => void;
 }) {
   return (
     <section className="grid gap-4 py-5 lg:grid-cols-[minmax(320px,420px)_1fr]">
@@ -1114,7 +1443,7 @@ function ClientSelect({
 }: {
   clients: Client[];
   selectedClientId: string | null;
-  onSelectClient: (clientId: string) => void;
+  onSelectClient: (clientId: string | null) => void;
 }) {
   return (
     <label className="v-stack min-w-[260px] gap-1 text-sm font-medium">
@@ -1122,7 +1451,7 @@ function ClientSelect({
       <select
         className="ui-input"
         value={selectedClientId ?? ""}
-        onChange={(event) => onSelectClient(event.target.value)}
+        onChange={(event) => onSelectClient(event.target.value || null)}
         disabled={clients.length === 0}
       >
         <option value="" disabled>
@@ -1135,6 +1464,215 @@ function ClientSelect({
         ))}
       </select>
     </label>
+  );
+}
+
+function MovementSearchModal({
+  client,
+  isSubmitting,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  client: Client;
+  isSubmitting: boolean;
+  error: Error | null;
+  onClose: () => void;
+  onSubmit: (options: MovementSearchOptions) => void;
+}) {
+  const [form, setForm] = useState<MovementSearchForm>(defaultMovementSearchForm);
+  const periodError = movementSearchPeriodError(form);
+  const periodDays = movementSearchPeriodDays(form);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !isSubmitting) {
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isSubmitting, onClose]);
+
+  function submitSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!periodError) {
+      onSubmit(normalizeMovementSearchOptions(form));
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-30 bg-ink/40 px-4 py-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="movement-search-title"
+    >
+      <div className="mx-auto max-h-[calc(100dvh-2rem)] max-w-3xl overflow-y-auto rounded-md border border-line bg-white shadow-subtle">
+        <form className="v-stack gap-5 p-4 sm:p-5" onSubmit={submitSearch}>
+          <div className="h-stack items-start gap-3">
+            <div className="center h-10 w-10 shrink-0 rounded-md bg-brand-50 text-brand-700">
+              <Search size={19} aria-hidden="true" />
+            </div>
+            <div className="min-w-0 grow">
+              <h2 id="movement-search-title" className="text-lg font-semibold">Buscar movimentacoes</h2>
+              <p className="mt-1 truncate text-sm text-neutral-600">{client.name}</p>
+            </div>
+            <button
+              className="ui-icon-button shrink-0"
+              type="button"
+              title="Fechar"
+              disabled={isSubmitting}
+              onClick={onClose}
+            >
+              <X size={17} aria-hidden="true" />
+            </button>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr]">
+            <label className="v-stack gap-1 text-sm font-medium">
+              Periodo
+              <select
+                className="ui-input"
+                value={form.preset}
+                onChange={(event) =>
+                  setForm(searchFormForPreset(event.target.value as SearchPeriodPreset, form))
+                }
+              >
+                {searchPeriodOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="v-stack gap-1 text-sm font-medium">
+              Inicio
+              <input
+                className="ui-input"
+                type="date"
+                value={form.startDate}
+                onChange={(event) =>
+                  setForm({ ...form, preset: "custom", startDate: event.target.value })
+                }
+                required
+              />
+            </label>
+            <label className="v-stack gap-1 text-sm font-medium">
+              Fim
+              <input
+                className="ui-input"
+                type="date"
+                value={form.endDate}
+                onChange={(event) =>
+                  setForm({ ...form, preset: "custom", endDate: event.target.value })
+                }
+                required
+              />
+            </label>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="ui-list-item h-stack cursor-pointer items-start gap-3">
+              <input
+                className="mt-1 h-4 w-4 accent-brand-600"
+                type="checkbox"
+                checked={form.analyzeRisks}
+                onChange={(event) => setForm({ ...form, analyzeRisks: event.target.checked })}
+              />
+              <span className="v-stack gap-1">
+                <span className="text-sm font-semibold">Analisar riscos ao concluir</span>
+                <span className="text-xs leading-5 text-neutral-600">
+                  Reprocessa palavras ativas apos a importacao.
+                </span>
+              </span>
+            </label>
+            <label className="ui-list-item h-stack cursor-pointer items-start gap-3">
+              <input
+                className="mt-1 h-4 w-4 accent-brand-600"
+                type="checkbox"
+                checked={form.openMovementsWhenDone}
+                onChange={(event) => setForm({ ...form, openMovementsWhenDone: event.target.checked })}
+              />
+              <span className="v-stack gap-1">
+                <span className="text-sm font-semibold">Abrir movimentacoes ao concluir</span>
+                <span className="text-xs leading-5 text-neutral-600">
+                  Direciona para a timeline depois da busca.
+                </span>
+              </span>
+            </label>
+          </div>
+
+          <div className="grid gap-2 rounded-md border border-line bg-neutral-50 p-3 sm:grid-cols-3">
+            <Metric label="Janela" value={`${periodDays} dia${periodDays === 1 ? "" : "s"}`} />
+            <Metric label="Inicio" value={formatDate(form.startDate)} />
+            <Metric label="Fim" value={formatDate(form.endDate)} />
+          </div>
+
+          {periodError && <p className="text-sm text-danger">{periodError}</p>}
+          <MutationError error={error} />
+
+          <div className="h-stack flex-wrap justify-end gap-2 border-t border-line pt-4">
+            <button className="ui-button" type="button" disabled={isSubmitting} onClick={onClose}>
+              Cancelar
+            </button>
+            <button
+              className="ui-button ui-button-primary h-stack items-center gap-2"
+              type="submit"
+              disabled={isSubmitting || Boolean(periodError)}
+            >
+              {isSubmitting ? (
+                <Loader2 className="animate-spin" size={17} aria-hidden="true" />
+              ) : (
+                <Search size={17} aria-hidden="true" />
+              )}
+              Iniciar busca
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function ClientFields({
+  value,
+  onChange,
+  cpfPlaceholder = "000.000.000-00",
+  cpfHint = "Opcional.",
+}: {
+  value: ClientPayload;
+  onChange: (value: ClientPayload) => void;
+  cpfPlaceholder?: string;
+  cpfHint?: string;
+}) {
+  return (
+    <>
+      <label className="v-stack gap-1 text-sm font-medium">
+        Nome
+        <input
+          className="ui-input"
+          value={value.name}
+          onChange={(event) => onChange({ ...value, name: event.target.value })}
+          minLength={3}
+          maxLength={255}
+          required
+          autoComplete="name"
+        />
+      </label>
+      <label className="v-stack gap-1 text-sm font-medium">
+        CPF
+        <input
+          className="ui-input"
+          value={value.cpf ?? ""}
+          onChange={(event) => onChange({ ...value, cpf: event.target.value })}
+          maxLength={32}
+          inputMode="numeric"
+          placeholder={cpfPlaceholder}
+        />
+        <span className="text-xs font-normal text-neutral-500">{cpfHint}</span>
+      </label>
+    </>
   );
 }
 
@@ -1244,13 +1782,22 @@ function RiskFilter({ value, onChange }: { value: string; onChange: (value: stri
   );
 }
 
-function RunStatus({ run }: { run: SearchRun | null }) {
+function RunStatus({
+  run,
+  options,
+  riskAutomation,
+}: {
+  run: SearchRun | null;
+  options: MovementSearchOptions | null;
+  riskAutomation: RiskAutomationState;
+}) {
   if (!run) {
     return null;
   }
   const isWorking = run.status === "queued" || run.status === "running";
   const isWaitingForAvailability = isWorking && run.rate_limit_remaining === 0;
   const shouldShowError = Boolean(run.error_message) && run.status !== "completed" && !isWaitingForAvailability;
+  const showRiskAutomation = options?.analyzeRisks && riskAutomation.runId === run.id;
   return (
     <div className="rounded-md border border-line bg-white p-3 text-sm">
       <div className="h-stack items-center gap-2">
@@ -1267,6 +1814,24 @@ function RunStatus({ run }: { run: SearchRun | null }) {
         <span>Importadas: {run.total_imported}</span>
         <span>Data: {formatDate(run.current_date)}</span>
       </div>
+      {options && (
+        <div className="mt-2 grid gap-2 border-t border-line pt-2 text-xs text-neutral-600 sm:grid-cols-2">
+          <span>
+            Periodo: {formatDate(options.startDate)} - {formatDate(options.endDate)}
+          </span>
+          <span>Riscos: {options.analyzeRisks ? riskAutomationLabel(riskAutomation) : "Sem reprocessamento"}</span>
+        </div>
+      )}
+      {showRiskAutomation && riskAutomation.result && (
+        <div className="mt-2 grid gap-2 rounded-md border border-line bg-neutral-50 p-2 text-xs sm:grid-cols-3">
+          <Metric label="Lidas" value={riskAutomation.result.scanned_communications} />
+          <Metric label="Com risco" value={riskAutomation.result.matched_communications} />
+          <Metric label="Evidencias" value={riskAutomation.result.matches_created} />
+        </div>
+      )}
+      {showRiskAutomation && riskAutomation.error && (
+        <p className="mt-2 text-danger">{riskAutomation.error}</p>
+      )}
       {isWaitingForAvailability && (
         <p className="mt-2 text-warning">Aguardando disponibilidade da consulta para continuar automaticamente.</p>
       )}
@@ -1785,6 +2350,91 @@ function EmptyState({ label }: { label: string }) {
   );
 }
 
+function PaginationControls({
+  page,
+  pageCount,
+  pageSize,
+  totalItems,
+  itemLabel,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  totalItems: number;
+  itemLabel: string;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
+}) {
+  const startItem = totalItems === 0 ? 0 : (page - 1) * pageSize + 1;
+  const endItem = Math.min(totalItems, page * pageSize);
+  return (
+    <div className="h-stack flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-neutral-50 px-3 py-2">
+      <span className="text-sm font-medium text-neutral-700">
+        {startItem}-{endItem} de {totalItems} {itemLabel}
+      </span>
+      <div className="h-stack flex-wrap items-center gap-2">
+        <label className="h-stack items-center gap-2 text-xs font-semibold text-neutral-600">
+          Por pagina
+          <select
+            className="ui-input min-h-9 py-1"
+            value={pageSize}
+            onChange={(event) => onPageSizeChange(Number(event.target.value))}
+          >
+            {pageSizeOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="h-stack gap-1">
+          <button
+            className="ui-icon-button h-9 w-9"
+            type="button"
+            title="Primeira pagina"
+            disabled={page <= 1}
+            onClick={() => onPageChange(1)}
+          >
+            <ChevronsLeft size={15} aria-hidden="true" />
+          </button>
+          <button
+            className="ui-icon-button h-9 w-9"
+            type="button"
+            title="Pagina anterior"
+            disabled={page <= 1}
+            onClick={() => onPageChange(page - 1)}
+          >
+            <ChevronLeft size={15} aria-hidden="true" />
+          </button>
+          <span className="center h-9 min-w-16 rounded-md border border-line bg-white px-2 text-xs font-semibold">
+            {page}/{pageCount}
+          </span>
+          <button
+            className="ui-icon-button h-9 w-9"
+            type="button"
+            title="Proxima pagina"
+            disabled={page >= pageCount}
+            onClick={() => onPageChange(page + 1)}
+          >
+            <ChevronRight size={15} aria-hidden="true" />
+          </button>
+          <button
+            className="ui-icon-button h-9 w-9"
+            type="button"
+            title="Ultima pagina"
+            disabled={page >= pageCount}
+            onClick={() => onPageChange(pageCount)}
+          >
+            <ChevronsRight size={15} aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MutationError({ error }: { error: Error | null }) {
   if (!error) {
     return null;
@@ -1834,6 +2484,49 @@ function highlightTerms(detail: ProcessDetail, client: Client | null): string[] 
   ];
 }
 
+function usePaginatedItems<T>(items: T[], initialPageSize: number) {
+  const [page, setPageState] = useState(1);
+  const [pageSize, setPageSizeState] = useState(initialPageSize);
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+
+  useEffect(() => {
+    setPageState(1);
+  }, [items, pageSize]);
+
+  useEffect(() => {
+    if (page > pageCount) {
+      setPageState(pageCount);
+    }
+  }, [page, pageCount]);
+
+  const safePage = Math.min(page, pageCount);
+  const start = (safePage - 1) * pageSize;
+
+  return {
+    items: items.slice(start, start + pageSize),
+    page: safePage,
+    pageCount,
+    pageSize,
+    totalItems: items.length,
+    setPage: (nextPage: number) => setPageState(Math.max(1, Math.min(pageCount, nextPage))),
+    setPageSize: (nextPageSize: number) => {
+      setPageSizeState(nextPageSize);
+      setPageState(1);
+    },
+  };
+}
+
+function defaultClientForm(): ClientPayload {
+  return {
+    name: "",
+    cpf: "",
+  };
+}
+
+function defaultMovementSearchForm(): MovementSearchForm {
+  return searchFormForPreset("last_30");
+}
+
 function defaultRiskForm(): RiskKeywordPayload {
   return {
     term: "",
@@ -1850,6 +2543,99 @@ function defaultWorkerForm(): WorkerStartPayload {
     max_jobs: null,
     poll_interval_seconds: 5,
   };
+}
+
+function normalizeMovementSearchOptions(payload: MovementSearchForm): MovementSearchOptions {
+  return {
+    startDate: payload.startDate,
+    endDate: payload.endDate,
+    analyzeRisks: payload.analyzeRisks,
+    openMovementsWhenDone: payload.openMovementsWhenDone,
+  };
+}
+
+function normalizeClientPayload(payload: ClientPayload): ClientPayload {
+  return {
+    name: payload.name.trim(),
+    cpf: payload.cpf?.trim() || null,
+  };
+}
+
+function normalizeClientUpdatePayload(payload: ClientPayload): Partial<ClientPayload> {
+  const cpf = payload.cpf?.trim();
+  return {
+    name: payload.name.trim(),
+    ...(cpf ? { cpf } : {}),
+  };
+}
+
+function searchFormForPreset(
+  preset: SearchPeriodPreset,
+  current?: MovementSearchForm,
+): MovementSearchForm {
+  const today = new Date();
+  let startDate = current?.startDate || dateInputValue(addDays(today, -29));
+  let endDate = current?.endDate || dateInputValue(today);
+
+  if (preset === "last_7") {
+    startDate = dateInputValue(addDays(today, -6));
+    endDate = dateInputValue(today);
+  }
+  if (preset === "last_30") {
+    startDate = dateInputValue(addDays(today, -29));
+    endDate = dateInputValue(today);
+  }
+  if (preset === "last_90") {
+    startDate = dateInputValue(addDays(today, -89));
+    endDate = dateInputValue(today);
+  }
+  if (preset === "current_month") {
+    startDate = dateInputValue(new Date(today.getFullYear(), today.getMonth(), 1));
+    endDate = dateInputValue(today);
+  }
+
+  return {
+    preset,
+    startDate,
+    endDate,
+    analyzeRisks: current?.analyzeRisks ?? true,
+    openMovementsWhenDone: current?.openMovementsWhenDone ?? false,
+  };
+}
+
+function movementSearchPeriodError(form: MovementSearchForm): string | null {
+  if (!form.startDate || !form.endDate) {
+    return "Informe inicio e fim do periodo.";
+  }
+  if (form.startDate > form.endDate) {
+    return "Data inicial deve ser anterior a data final.";
+  }
+  return null;
+}
+
+function movementSearchPeriodDays(form: MovementSearchForm): number {
+  if (!form.startDate || !form.endDate || form.startDate > form.endDate) {
+    return 0;
+  }
+  const start = Date.parse(`${form.startDate}T00:00:00`);
+  const end = Date.parse(`${form.endDate}T00:00:00`);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return 0;
+  }
+  return Math.max(1, Math.round((end - start) / 86_400_000) + 1);
+}
+
+function addDays(value: Date, days: number): Date {
+  const next = new Date(value);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function dateInputValue(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function normalizeRiskPayload(payload: RiskKeywordPayload): RiskKeywordPayload {
@@ -1941,6 +2727,22 @@ function riskSourceLabel(source: string): string {
     return "Metadados";
   }
   return source;
+}
+
+function riskAutomationLabel(state: RiskAutomationState): string {
+  if (state.status === "pending") {
+    return "Aguardando conclusao";
+  }
+  if (state.status === "running") {
+    return "Reprocessando";
+  }
+  if (state.status === "completed") {
+    return "Concluida";
+  }
+  if (state.status === "failed") {
+    return "Falhou";
+  }
+  return "Nao solicitada";
 }
 
 function statusLabel(status: string): string {

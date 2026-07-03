@@ -40,6 +40,7 @@ from app.risk import (
 from app.schemas import (
     ClientCreate,
     ClientRead,
+    ClientUpdate,
     CommunicationListItem,
     CommunicationRead,
     DataJudMovementRead,
@@ -49,6 +50,7 @@ from app.schemas import (
     ProcessDetail,
     ProcessEnrichmentCreate,
     ProcessEnrichmentRead,
+    ProcessPageRead,
     ProcessListItem,
     ProcessPartyRead,
     RiskKeywordCreate,
@@ -279,6 +281,39 @@ async def list_clients(session: AsyncSession = Depends(get_session)) -> list[Cli
     return [await _client_read(session, client) for client in clients]
 
 
+@router.patch("/clients/{client_id}", response_model=ClientRead)
+async def update_client(
+    client_id: str,
+    payload: ClientUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> ClientRead:
+    client = await session.get(Client, client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado")
+
+    fields = payload.model_fields_set
+    if "name" in fields and payload.name is not None:
+        client.name = payload.name
+        client.normalized_name = normalize_name(payload.name)
+    if "cpf" in fields:
+        client.cpf = payload.cpf
+
+    await session.commit()
+    await session.refresh(client)
+    return await _client_read(session, client)
+
+
+@router.delete("/clients/{client_id}", response_model=ClientRead)
+async def delete_client(client_id: str, session: AsyncSession = Depends(get_session)) -> ClientRead:
+    client = await session.get(Client, client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado")
+    deleted = await _client_read(session, client)
+    await session.delete(client)
+    await session.commit()
+    return deleted
+
+
 @router.post("/clients/{client_id}/search-runs", response_model=SearchRunRead, status_code=201)
 async def create_search_run(
     client_id: str,
@@ -327,6 +362,64 @@ async def list_processes(
         statement = statement.where(ClientProcess.client_id == client_id)
     result = await session.execute(statement)
     return [_process_item(process, client_process) for process, client_process in result.all()]
+
+
+@router.get("/processes/page", response_model=ProcessPageRead)
+async def list_processes_page(
+    client_id: str | None = Query(default=None),
+    risk_filter: str = Query(default="todos"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+) -> ProcessPageRead:
+    base_statement = (
+        select(Process.id)
+        .join(ClientProcess, ClientProcess.process_id == Process.id)
+        .order_by(ClientProcess.last_movement_at.desc().nullslast(), Process.numero_processo.asc())
+    )
+    if client_id:
+        base_statement = base_statement.where(ClientProcess.client_id == client_id)
+    base_statement = _apply_process_risk_filter(base_statement, risk_filter)
+
+    count_statement = select(func.count()).select_from(base_statement.order_by(None).subquery())
+    total = int(await session.scalar(count_statement) or 0)
+    process_ids = (
+        await session.execute(base_statement.offset((page - 1) * page_size).limit(page_size))
+    ).scalars().all()
+    if not process_ids:
+        return ProcessPageRead(
+            items=[],
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        )
+
+    result = await session.execute(
+        select(Process, ClientProcess)
+        .join(ClientProcess, ClientProcess.process_id == Process.id)
+        .where(Process.id.in_(process_ids))
+        .options(
+            selectinload(Process.communications).selectinload(Communication.parties),
+            selectinload(Process.communications)
+            .selectinload(Communication.risk_matches)
+            .selectinload(CommunicationRiskMatch.keyword),
+        )
+    )
+    by_id = {process.id: (process, client_process) for process, client_process in result.all()}
+    items = [
+        _process_item(process, client_process)
+        for process_id in process_ids
+        if (row := by_id.get(process_id))
+        for process, client_process in [row]
+    ]
+    return ProcessPageRead(
+        items=items,
+        page=page,
+        page_size=page_size,
+        total=total,
+        total_pages=_total_pages(total, page_size),
+    )
 
 
 @router.get("/processes/{process_id}", response_model=ProcessDetail)
@@ -593,6 +686,33 @@ def _worker_effective_status(worker: WorkerInstance, last_seen_seconds: int | No
     if last_seen_seconds is not None and last_seen_seconds > WORKER_HEARTBEAT_STALE_SECONDS:
         return "stale"
     return worker.status
+
+
+def _apply_process_risk_filter(statement, risk_filter: str):
+    if risk_filter == "com_risco":
+        return statement.where(_process_has_risk_match())
+    if risk_filter == "sem_risco":
+        return statement.where(~_process_has_risk_match())
+    if risk_filter in RISK_LEVEL_ORDER:
+        return statement.where(_process_has_risk_match(risk_filter))
+    return statement
+
+
+def _process_has_risk_match(risk_level: str | None = None):
+    risk_statement = (
+        select(CommunicationRiskMatch.id)
+        .join(Communication, Communication.id == CommunicationRiskMatch.communication_id)
+        .where(Communication.process_id == Process.id)
+    )
+    if risk_level:
+        risk_statement = risk_statement.join(RiskKeyword).where(RiskKeyword.risk_level == risk_level)
+    return risk_statement.exists()
+
+
+def _total_pages(total: int, page_size: int) -> int:
+    if total <= 0:
+        return 1
+    return (total + page_size - 1) // page_size
 
 
 def _process_item(process: Process, client_process: ClientProcess | None) -> ProcessListItem:

@@ -26,6 +26,26 @@ class ClientCreate(BaseModel):
         return normalize_cpf(value)
 
 
+class ClientUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=3, max_length=255)
+    cpf: str | None = Field(default=None, max_length=32)
+
+    @field_validator("name")
+    @classmethod
+    def strip_optional_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        name = " ".join(value.strip().split())
+        if len(name) < 3:
+            raise ValueError("Nome deve ter pelo menos 3 caracteres")
+        return name
+
+    @field_validator("cpf")
+    @classmethod
+    def normalize_optional_input_cpf(cls, value: str | None) -> str | None:
+        return normalize_cpf(value)
+
+
 class ClientRead(BaseModel):
     id: str
     name: str
@@ -249,6 +269,14 @@ class ProcessListItem(BaseModel):
     risk_matches_count: int
     highest_risk_level: str | None
     risk_matches: list[RiskMatchRead]
+
+
+class ProcessPageRead(BaseModel):
+    items: list[ProcessListItem]
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
 
 
 class PartyRead(BaseModel):

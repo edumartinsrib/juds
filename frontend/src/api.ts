@@ -1,9 +1,11 @@
 import type {
   Client,
+  ClientPayload,
   CommunicationDetail,
   ProcessEnrichment,
   ProcessDetail,
   ProcessListItem,
+  PaginatedResponse,
   RiskKeyword,
   RiskKeywordMutation,
   RiskKeywordPayload,
@@ -35,10 +37,23 @@ export function listClients(): Promise<Client[]> {
   return request<Client[]>("/api/clients");
 }
 
-export function createClient(payload: { name: string }): Promise<Client> {
+export function createClient(payload: ClientPayload): Promise<Client> {
   return request<Client>("/api/clients", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function updateClient(clientId: string, payload: Partial<ClientPayload>): Promise<Client> {
+  return request<Client>(`/api/clients/${clientId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteClient(clientId: string): Promise<Client> {
+  return request<Client>(`/api/clients/${clientId}`, {
+    method: "DELETE",
   });
 }
 
@@ -76,6 +91,28 @@ export function stopWorker(workerId: string): Promise<WorkerInstance> {
 export function listProcesses(clientId?: string | null): Promise<ProcessListItem[]> {
   const query = clientId ? `?client_id=${encodeURIComponent(clientId)}` : "";
   return request<ProcessListItem[]>(`/api/processes${query}`);
+}
+
+export function listProcessesPage({
+  clientId,
+  riskFilter = "todos",
+  page,
+  pageSize,
+}: {
+  clientId?: string | null;
+  riskFilter?: string;
+  page: number;
+  pageSize: number;
+}): Promise<PaginatedResponse<ProcessListItem>> {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+    risk_filter: riskFilter,
+  });
+  if (clientId) {
+    params.set("client_id", clientId);
+  }
+  return request<PaginatedResponse<ProcessListItem>>(`/api/processes/page?${params.toString()}`);
 }
 
 export function getProcess(processId: string): Promise<ProcessDetail> {

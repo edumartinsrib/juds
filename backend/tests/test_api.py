@@ -78,6 +78,16 @@ async def test_client_search_run_and_export_flow(session) -> None:
         assert detail["timeline"][0]["plain_text"] == "Intimacao com prazo de 10 dias"
         assert detail["lawyers"][0]["name"] == "Maria Advogada"
 
+        page_response = await client.get(
+            "/api/processes/page",
+            params={"client_id": created["id"], "page": 1, "page_size": 1},
+        )
+        assert page_response.status_code == 200
+        process_page = page_response.json()
+        assert process_page["total"] == 1
+        assert process_page["total_pages"] == 1
+        assert process_page["items"][0]["id"] == processes[0]["id"]
+
         fake_datajud = FakeDataJudClient(
             [
                 DataJudSearchResult(
@@ -139,6 +149,48 @@ async def test_client_search_run_and_export_flow(session) -> None:
         assert xlsx_response.content[:2] == b"PK"
 
 
+async def test_client_update_and_delete_flow(session) -> None:
+    async with api_client() as client:
+        create_response = await client.post(
+            "/api/clients",
+            json={"name": "Joao da Silva", "cpf": "123.456.789-01"},
+        )
+        assert create_response.status_code == 201
+        created = create_response.json()
+
+        update_response = await client.patch(
+            f"/api/clients/{created['id']}",
+            json={"name": "Maria de Souza", "cpf": "987.654.321-00"},
+        )
+        assert update_response.status_code == 200
+        updated = update_response.json()
+        assert updated["name"] == "Maria de Souza"
+        assert updated["cpf_masked"] == "987.***.***-00"
+
+        db_client = await session.get(Client, created["id"])
+        assert db_client.name == "Maria de Souza"
+        assert db_client.normalized_name == "MARIA DE SOUZA"
+        assert db_client.cpf == "98765432100"
+
+        clear_cpf_response = await client.patch(
+            f"/api/clients/{created['id']}",
+            json={"cpf": None},
+        )
+        assert clear_cpf_response.status_code == 200
+        assert clear_cpf_response.json()["cpf_masked"] is None
+
+        delete_response = await client.delete(f"/api/clients/{created['id']}")
+        assert delete_response.status_code == 200
+        assert delete_response.json()["id"] == created["id"]
+
+        list_response = await client.get("/api/clients")
+        assert list_response.status_code == 200
+        assert list_response.json() == []
+
+        second_delete_response = await client.delete(f"/api/clients/{created['id']}")
+        assert second_delete_response.status_code == 404
+
+
 async def test_risk_keyword_crud_reprocesses_existing_communications(session) -> None:
     async with api_client() as client:
         create_response = await client.post("/api/clients", json={"name": "Joao da Silva"})
@@ -167,6 +219,20 @@ async def test_risk_keyword_crud_reprocesses_existing_communications(session) ->
         assert created_keyword["reprocess"]["scanned_communications"] == 1
         assert created_keyword["reprocess"]["matched_communications"] == 1
         assert created_keyword["keyword"]["match_count"] == 1
+
+        risk_page = await client.get(
+            "/api/processes/page",
+            params={"client_id": created["id"], "risk_filter": "alto", "page": 1, "page_size": 10},
+        )
+        assert risk_page.status_code == 200
+        assert risk_page.json()["total"] == 1
+
+        no_risk_page = await client.get(
+            "/api/processes/page",
+            params={"client_id": created["id"], "risk_filter": "sem_risco", "page": 1, "page_size": 10},
+        )
+        assert no_risk_page.status_code == 200
+        assert no_risk_page.json()["total"] == 0
 
         processes = (
             await client.get("/api/processes", params={"client_id": created["id"]})

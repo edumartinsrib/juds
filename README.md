@@ -9,6 +9,7 @@ Gestao local de processos, movimentacoes e informacoes complementares por pessoa
 - Persistência de clientes, execuções de busca, processos, comunicações, partes e advogados.
 - Persistência de capa, classe, órgão, assuntos, grau, sistema, sigilo e historico complementar no processo.
 - Atualizacao processo a processo por numero exato, combinando dados complementares com busca retroativa de movimentacoes.
+- Busca de movimentacoes com periodo configuravel, atalhos de janela e reprocessamento opcional de riscos ao concluir.
 - Gestão de palavras-chave de risco com severidade, categoria, evidência por trecho e reprocessamento das comunicações já importadas.
 - Controle de robos de busca com registro de instâncias, sinal de atividade, busca atual, início sob demanda pela API e solicitação de parada.
 - CPF é normalizado no backend, mascarado na interface e nunca inferido quando a fonte não o informa.
@@ -55,12 +56,15 @@ npm run build
 
 - `POST /api/clients`
 - `GET /api/clients`
+- `PATCH /api/clients/{id}`
+- `DELETE /api/clients/{id}`
 - `POST /api/clients/{id}/search-runs`
 - `GET /api/search-runs/{id}`
 - `GET /api/workers`
 - `POST /api/workers`
 - `POST /api/workers/{id}/stop`
 - `GET /api/processes?client_id=...`
+- `GET /api/processes/page?client_id=...&page=1&page_size=10`
 - `GET /api/processes/{id}`
 - `POST /api/processes/{id}/enrich`
 - `GET /api/communications/{id}`

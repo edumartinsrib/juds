@@ -1,10 +1,24 @@
 export type Client = {
   id: string;
   name: string;
+  cpf_masked: string | null;
   process_count: number;
   communication_count: number;
   pending_runs: number;
   created_at: string;
+};
+
+export type ClientPayload = {
+  name: string;
+  cpf?: string | null;
+};
+
+export type PaginatedResponse<T> = {
+  items: T[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
 };
 
 export type SearchRun = {
