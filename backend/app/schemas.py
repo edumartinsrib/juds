@@ -238,6 +238,83 @@ class RiskMatchRead(BaseModel):
     created_at: datetime
 
 
+class ProcessPhaseKeywordCreate(BaseModel):
+    term: str = Field(min_length=2, max_length=255)
+    phase_name: str = Field(min_length=2, max_length=120)
+    phase_order: int = Field(default=10, ge=1, le=999)
+    description: str | None = Field(default=None, max_length=1000)
+    active: bool = True
+
+    @field_validator("term", "phase_name")
+    @classmethod
+    def strip_phase_text(cls, value: str) -> str:
+        text = " ".join(value.strip().split())
+        if len(text) < 2:
+            raise ValueError("Campo deve ter pelo menos 2 caracteres")
+        return text
+
+    @field_validator("description")
+    @classmethod
+    def strip_phase_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
+
+
+class ProcessPhaseKeywordUpdate(BaseModel):
+    term: str | None = Field(default=None, min_length=2, max_length=255)
+    phase_name: str | None = Field(default=None, min_length=2, max_length=120)
+    phase_order: int | None = Field(default=None, ge=1, le=999)
+    description: str | None = Field(default=None, max_length=1000)
+    active: bool | None = None
+
+    @field_validator("term", "phase_name")
+    @classmethod
+    def strip_optional_phase_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = " ".join(value.strip().split())
+        if len(text) < 2:
+            raise ValueError("Campo deve ter pelo menos 2 caracteres")
+        return text
+
+    @field_validator("description")
+    @classmethod
+    def strip_optional_phase_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
+
+
+class ProcessPhaseKeywordRead(BaseModel):
+    id: str
+    phase_key: str
+    phase_name: str
+    phase_order: int
+    term: str
+    normalized_term: str
+    description: str | None
+    active: bool
+    is_default: bool
+    match_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProcessPhaseMatchRead(BaseModel):
+    keyword_id: str
+    phase_key: str
+    phase_name: str
+    phase_order: int
+    keyword: str
+    source: str
+    matched_text: str
+    excerpt: str
+    occurred_at: datetime | None
+
+
 class ProcessEnrichmentCreate(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
@@ -269,6 +346,9 @@ class ProcessListItem(BaseModel):
     risk_matches_count: int
     highest_risk_level: str | None
     risk_matches: list[RiskMatchRead]
+    phase_matches_count: int
+    current_phase: ProcessPhaseMatchRead | None
+    phase_matches: list[ProcessPhaseMatchRead]
 
 
 class ProcessPageRead(BaseModel):

@@ -7,6 +7,8 @@ import type {
   ProcessFilterOptions,
   ProcessListItem,
   ProcessPageFilters,
+  ProcessPhaseKeyword,
+  ProcessPhaseKeywordPayload,
   PaginatedResponse,
   RiskKeyword,
   RiskKeywordMutation,
@@ -191,6 +193,41 @@ export function deleteRiskKeyword(keywordId: string): Promise<RiskKeywordMutatio
 
 export function reprocessRiskKeywords(): Promise<RiskReprocess> {
   return request<RiskReprocess>("/api/risk-keywords/reprocess", {
+    method: "POST",
+  });
+}
+
+export function listProcessPhaseKeywords(): Promise<ProcessPhaseKeyword[]> {
+  return request<ProcessPhaseKeyword[]>("/api/process-phase-keywords");
+}
+
+export function createProcessPhaseKeyword(
+  payload: ProcessPhaseKeywordPayload,
+): Promise<ProcessPhaseKeyword> {
+  return request<ProcessPhaseKeyword>("/api/process-phase-keywords", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateProcessPhaseKeyword(
+  keywordId: string,
+  payload: Partial<ProcessPhaseKeywordPayload>,
+): Promise<ProcessPhaseKeyword> {
+  return request<ProcessPhaseKeyword>(`/api/process-phase-keywords/${keywordId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteProcessPhaseKeyword(keywordId: string): Promise<ProcessPhaseKeyword> {
+  return request<ProcessPhaseKeyword>(`/api/process-phase-keywords/${keywordId}`, {
+    method: "DELETE",
+  });
+}
+
+export function restoreProcessPhaseDefaults(): Promise<ProcessPhaseKeyword[]> {
+  return request<ProcessPhaseKeyword[]>("/api/process-phase-keywords/defaults", {
     method: "POST",
   });
 }

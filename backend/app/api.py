@@ -26,6 +26,7 @@ from app.models import (
     CommunicationParty,
     Lawyer,
     Process,
+    ProcessPhaseKeyword,
     CommunicationRiskMatch,
     RiskKeyword,
     SearchRun,
@@ -36,6 +37,18 @@ from app.risk import (
     normalize_risk_term,
     reprocess_all_risk_matches,
     risk_keyword_match_counts,
+)
+from app.phases import (
+    PhaseMatch,
+    MAX_DATAJUD_COUNT_MOVEMENTS,
+    MAX_DATAJUD_PHASE_MOVEMENTS,
+    classify_process_phases,
+    list_active_phase_keywords,
+    list_phase_keywords,
+    normalize_phase_term,
+    phase_key_from_name,
+    phase_keyword_match_counts,
+    restore_default_phase_keywords,
 )
 from app.schemas import (
     ClientCreate,
@@ -52,6 +65,10 @@ from app.schemas import (
     ProcessEnrichmentRead,
     ProcessFilterOptionsRead,
     ProcessPageRead,
+    ProcessPhaseKeywordCreate,
+    ProcessPhaseKeywordRead,
+    ProcessPhaseKeywordUpdate,
+    ProcessPhaseMatchRead,
     ProcessListItem,
     ProcessPartyRead,
     RiskKeywordCreate,
@@ -266,6 +283,109 @@ async def reprocess_risk_keywords(session: AsyncSession = Depends(get_session)) 
     return _risk_reprocess_read(reprocess)
 
 
+@router.get("/process-phase-keywords", response_model=list[ProcessPhaseKeywordRead])
+async def list_process_phase_keywords(
+    session: AsyncSession = Depends(get_session),
+) -> list[ProcessPhaseKeywordRead]:
+    keywords = await list_phase_keywords(session)
+    counts = await phase_keyword_match_counts(session)
+    return [_phase_keyword_read(keyword, counts.get(keyword.id, 0)) for keyword in keywords]
+
+
+@router.post("/process-phase-keywords", response_model=ProcessPhaseKeywordRead, status_code=201)
+async def create_process_phase_keyword(
+    payload: ProcessPhaseKeywordCreate,
+    session: AsyncSession = Depends(get_session),
+) -> ProcessPhaseKeywordRead:
+    await list_phase_keywords(session)
+    phase_key = phase_key_from_name(payload.phase_name)
+    normalized_term = normalize_phase_term(payload.term)
+    await _ensure_unique_phase_keyword(session, phase_key, normalized_term)
+    keyword = ProcessPhaseKeyword(
+        phase_key=phase_key,
+        phase_name=payload.phase_name,
+        phase_order=payload.phase_order,
+        term=payload.term,
+        normalized_term=normalized_term,
+        description=payload.description,
+        active=payload.active,
+        is_default=False,
+    )
+    session.add(keyword)
+    await session.commit()
+    await session.refresh(keyword)
+    counts = await phase_keyword_match_counts(session)
+    return _phase_keyword_read(keyword, counts.get(keyword.id, 0))
+
+
+@router.patch("/process-phase-keywords/{keyword_id}", response_model=ProcessPhaseKeywordRead)
+async def update_process_phase_keyword(
+    keyword_id: str,
+    payload: ProcessPhaseKeywordUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> ProcessPhaseKeywordRead:
+    keyword = await session.get(ProcessPhaseKeyword, keyword_id)
+    if not keyword:
+        raise HTTPException(status_code=404, detail="Palavra de fase nao encontrada")
+
+    fields = payload.model_fields_set
+    next_phase_name = payload.phase_name if "phase_name" in fields and payload.phase_name is not None else keyword.phase_name
+    next_phase_key = phase_key_from_name(next_phase_name)
+    next_term = payload.term if "term" in fields and payload.term is not None else keyword.term
+    next_normalized_term = normalize_phase_term(next_term)
+    if next_phase_key != keyword.phase_key or next_normalized_term != keyword.normalized_term:
+        await _ensure_unique_phase_keyword(
+            session,
+            next_phase_key,
+            next_normalized_term,
+            keyword_id=keyword.id,
+        )
+
+    if "phase_name" in fields and payload.phase_name is not None:
+        keyword.phase_name = payload.phase_name
+        keyword.phase_key = next_phase_key
+    if "phase_order" in fields and payload.phase_order is not None:
+        keyword.phase_order = payload.phase_order
+    if "term" in fields and payload.term is not None:
+        keyword.term = payload.term
+        keyword.normalized_term = next_normalized_term
+    if "description" in fields:
+        keyword.description = payload.description
+    if "active" in fields and payload.active is not None:
+        keyword.active = payload.active
+    if fields & {"term", "phase_name", "phase_order", "description"}:
+        keyword.is_default = False
+
+    await session.commit()
+    await session.refresh(keyword)
+    counts = await phase_keyword_match_counts(session)
+    return _phase_keyword_read(keyword, counts.get(keyword.id, 0))
+
+
+@router.delete("/process-phase-keywords/{keyword_id}", response_model=ProcessPhaseKeywordRead)
+async def delete_process_phase_keyword(
+    keyword_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ProcessPhaseKeywordRead:
+    keyword = await session.get(ProcessPhaseKeyword, keyword_id)
+    if not keyword:
+        raise HTTPException(status_code=404, detail="Palavra de fase nao encontrada")
+    counts = await phase_keyword_match_counts(session)
+    deleted = _phase_keyword_read(keyword, counts.get(keyword.id, 0))
+    await session.delete(keyword)
+    await session.commit()
+    return deleted
+
+
+@router.post("/process-phase-keywords/defaults", response_model=list[ProcessPhaseKeywordRead])
+async def restore_process_phase_keyword_defaults(
+    session: AsyncSession = Depends(get_session),
+) -> list[ProcessPhaseKeywordRead]:
+    keywords = await restore_default_phase_keywords(session)
+    counts = await phase_keyword_match_counts(session)
+    return [_phase_keyword_read(keyword, counts.get(keyword.id, 0)) for keyword in keywords]
+
+
 @router.post("/clients", response_model=ClientRead, status_code=201)
 async def create_client(payload: ClientCreate, session: AsyncSession = Depends(get_session)) -> ClientRead:
     client = Client(name=payload.name, normalized_name=normalize_name(payload.name), cpf=payload.cpf)
@@ -362,7 +482,16 @@ async def list_processes(
     if client_id:
         statement = statement.where(ClientProcess.client_id == client_id)
     result = await session.execute(statement)
-    return [_process_item(process, client_process) for process, client_process in result.all()]
+    phase_keywords = await list_active_phase_keywords(session)
+    return [
+        _process_item(
+            process,
+            client_process,
+            phase_keywords,
+            phase_movement_limit=MAX_DATAJUD_COUNT_MOVEMENTS,
+        )
+        for process, client_process in result.all()
+    ]
 
 
 @router.get("/processes/page", response_model=ProcessPageRead)
@@ -425,8 +554,14 @@ async def list_processes_page(
         )
     )
     by_id = {process.id: (process, client_process) for process, client_process in result.all()}
+    phase_keywords = await list_active_phase_keywords(session)
     items = [
-        _process_item(process, client_process)
+        _process_item(
+            process,
+            client_process,
+            phase_keywords,
+            phase_movement_limit=MAX_DATAJUD_COUNT_MOVEMENTS,
+        )
         for process_id in process_ids
         if (row := by_id.get(process_id))
         for process, client_process in [row]
@@ -458,7 +593,8 @@ async def get_process(process_id: str, session: AsyncSession = Depends(get_sessi
     process = await _get_process_for_detail(session, process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Processo nao encontrado")
-    return _process_detail(process)
+    phase_keywords = await list_active_phase_keywords(session)
+    return _process_detail(process, phase_keywords)
 
 
 @router.post("/processes/{process_id}/enrich", response_model=ProcessEnrichmentRead)
@@ -497,8 +633,9 @@ async def enrich_process(
     refreshed = await _get_process_for_detail(session, result.process.id)
     if not refreshed:
         raise HTTPException(status_code=404, detail="Processo nao encontrado")
+    phase_keywords = await list_active_phase_keywords(session)
     return ProcessEnrichmentRead(
-        process=_process_detail(refreshed),
+        process=_process_detail(refreshed, phase_keywords),
         start_date=result.start_date,
         end_date=result.end_date,
         datajud_attempted=result.datajud_attempted,
@@ -528,7 +665,10 @@ async def _get_process_for_detail(session: AsyncSession, process_id: str) -> Pro
     return result.scalar_one_or_none()
 
 
-def _process_detail(process: Process) -> ProcessDetail:
+def _process_detail(
+    process: Process,
+    phase_keywords: list[ProcessPhaseKeyword],
+) -> ProcessDetail:
     client_process = process.client_processes[0] if process.client_processes else None
     timeline = sorted(process.communications, key=lambda item: (item.data_disponibilizacao, item.id))
     parties = [party for communication in timeline for party in communication.parties]
@@ -537,7 +677,7 @@ def _process_detail(process: Process) -> ProcessDetail:
         for communication in timeline
         for link in communication.communication_lawyers
     }
-    base = _process_item(process, client_process)
+    base = _process_item(process, client_process, phase_keywords)
     return ProcessDetail(
         **base.model_dump(),
         datajud=_datajud_read(process),
@@ -845,8 +985,15 @@ def _total_pages(total: int, page_size: int) -> int:
     return (total + page_size - 1) // page_size
 
 
-def _process_item(process: Process, client_process: ClientProcess | None) -> ProcessListItem:
+def _process_item(
+    process: Process,
+    client_process: ClientProcess | None,
+    phase_keywords: list[ProcessPhaseKeyword],
+    *,
+    phase_movement_limit: int = MAX_DATAJUD_PHASE_MOVEMENTS,
+) -> ProcessListItem:
     risk_matches = _process_risk_matches(process)
+    phase_matches = _process_phase_matches(process, phase_keywords, movement_limit=phase_movement_limit)
     return ProcessListItem(
         id=process.id,
         numero_processo=process.numero_processo,
@@ -866,6 +1013,9 @@ def _process_item(process: Process, client_process: ClientProcess | None) -> Pro
         risk_matches_count=len(risk_matches),
         highest_risk_level=_highest_risk_level(risk_matches),
         risk_matches=risk_matches,
+        phase_matches_count=len(phase_matches),
+        current_phase=phase_matches[0] if phase_matches else None,
+        phase_matches=phase_matches[:12],
     )
 
 
@@ -1083,6 +1233,24 @@ async def _ensure_unique_risk_keyword(
         raise HTTPException(status_code=409, detail="Palavra de risco ja cadastrada")
 
 
+async def _ensure_unique_phase_keyword(
+    session: AsyncSession,
+    phase_key: str,
+    normalized_term: str,
+    *,
+    keyword_id: str | None = None,
+) -> None:
+    statement = select(ProcessPhaseKeyword).where(
+        ProcessPhaseKeyword.phase_key == phase_key,
+        ProcessPhaseKeyword.normalized_term == normalized_term,
+    )
+    if keyword_id:
+        statement = statement.where(ProcessPhaseKeyword.id != keyword_id)
+    existing = (await session.execute(statement)).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="Palavra de fase ja cadastrada para esta fase")
+
+
 def _risk_keyword_read(keyword: RiskKeyword, match_count: int) -> RiskKeywordRead:
     return RiskKeywordRead(
         id=keyword.id,
@@ -1092,6 +1260,23 @@ def _risk_keyword_read(keyword: RiskKeyword, match_count: int) -> RiskKeywordRea
         risk_level=keyword.risk_level,
         description=keyword.description,
         active=keyword.active,
+        match_count=match_count,
+        created_at=keyword.created_at,
+        updated_at=keyword.updated_at,
+    )
+
+
+def _phase_keyword_read(keyword: ProcessPhaseKeyword, match_count: int) -> ProcessPhaseKeywordRead:
+    return ProcessPhaseKeywordRead(
+        id=keyword.id,
+        phase_key=keyword.phase_key,
+        phase_name=keyword.phase_name,
+        phase_order=keyword.phase_order,
+        term=keyword.term,
+        normalized_term=keyword.normalized_term,
+        description=keyword.description,
+        active=keyword.active,
+        is_default=keyword.is_default,
         match_count=match_count,
         created_at=keyword.created_at,
         updated_at=keyword.updated_at,
@@ -1113,6 +1298,36 @@ def _process_risk_matches(process: Process) -> list[RiskMatchRead]:
             for communication in process.communications
             for match in communication.risk_matches
         ]
+    )
+
+
+def _process_phase_matches(
+    process: Process,
+    phase_keywords: list[ProcessPhaseKeyword],
+    *,
+    movement_limit: int = MAX_DATAJUD_PHASE_MOVEMENTS,
+) -> list[ProcessPhaseMatchRead]:
+    return [
+        _phase_match_read(match)
+        for match in classify_process_phases(
+            process,
+            phase_keywords,
+            movement_limit=movement_limit,
+        )
+    ]
+
+
+def _phase_match_read(match: PhaseMatch) -> ProcessPhaseMatchRead:
+    return ProcessPhaseMatchRead(
+        keyword_id=match.keyword_id,
+        phase_key=match.phase_key,
+        phase_name=match.phase_name,
+        phase_order=match.phase_order,
+        keyword=match.keyword,
+        source=match.source,
+        matched_text=match.matched_text,
+        excerpt=match.excerpt,
+        occurred_at=match.occurred_at,
     )
 
 

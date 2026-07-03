@@ -39,6 +39,41 @@ export type ProcessFilterOptions = {
   agencies: string[];
 };
 
+export type ProcessPhaseKeywordPayload = {
+  term: string;
+  phase_name: string;
+  phase_order: number;
+  description?: string | null;
+  active: boolean;
+};
+
+export type ProcessPhaseKeyword = {
+  id: string;
+  phase_key: string;
+  phase_name: string;
+  phase_order: number;
+  term: string;
+  normalized_term: string;
+  description: string | null;
+  active: boolean;
+  is_default: boolean;
+  match_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProcessPhaseMatch = {
+  keyword_id: string;
+  phase_key: string;
+  phase_name: string;
+  phase_order: number;
+  keyword: string;
+  source: string;
+  matched_text: string;
+  excerpt: string;
+  occurred_at: string | null;
+};
+
 export type SearchRun = {
   id: string;
   client_id: string;
@@ -130,6 +165,9 @@ export type ProcessListItem = {
   risk_matches_count: number;
   highest_risk_level: RiskLevel | null;
   risk_matches: RiskMatch[];
+  phase_matches_count: number;
+  current_phase: ProcessPhaseMatch | null;
+  phase_matches: ProcessPhaseMatch[];
 };
 
 export type ProcessParty = {

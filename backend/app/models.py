@@ -296,3 +296,23 @@ class CommunicationRiskMatch(TimestampMixin, Base):
 
     communication: Mapped["Communication"] = relationship(back_populates="risk_matches")
     keyword: Mapped["RiskKeyword"] = relationship(back_populates="matches")
+
+
+class ProcessPhaseKeyword(TimestampMixin, Base):
+    __tablename__ = "process_phase_keywords"
+    __table_args__ = (
+        UniqueConstraint("phase_key", "normalized_term", name="uq_process_phase_keyword_term"),
+        Index("ix_process_phase_keywords_active", "active"),
+        Index("ix_process_phase_keywords_phase", "phase_key"),
+        Index("ix_process_phase_keywords_order", "phase_order"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    phase_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    phase_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    phase_order: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    term: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_term: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)

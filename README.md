@@ -11,6 +11,7 @@ Gestao local de processos, movimentacoes e informacoes complementares por pessoa
 - Atualizacao processo a processo por numero exato, combinando dados complementares com busca retroativa de movimentacoes.
 - Busca de movimentacoes com periodo configuravel, atalhos de janela e reprocessamento opcional de riscos ao concluir.
 - Gestão de palavras-chave de risco com severidade, categoria, evidência por trecho e reprocessamento das comunicações já importadas.
+- Configuracao de palavras-chave para fases processuais, com padroes de execucao e classificacao por DJEN/DataJud.
 - Controle de robos de busca com registro de instâncias, sinal de atividade, busca atual, início sob demanda pela API e solicitação de parada.
 - CPF é normalizado no backend, mascarado na interface e nunca inferido quando a fonte não o informa.
 - Texto HTML/XML importado é convertido para texto seguro e o conteúdo bruto é preservado para auditoria.
@@ -68,6 +69,11 @@ npm run build
 - `GET /api/processes/filter-options?client_id=...`
 - `GET /api/processes/{id}`
 - `POST /api/processes/{id}/enrich`
+- `GET /api/process-phase-keywords`
+- `POST /api/process-phase-keywords`
+- `PATCH /api/process-phase-keywords/{id}`
+- `DELETE /api/process-phase-keywords/{id}`
+- `POST /api/process-phase-keywords/defaults`
 - `GET /api/communications/{id}`
 - `GET /api/risk-keywords`
 - `POST /api/risk-keywords`

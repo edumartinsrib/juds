@@ -306,6 +306,69 @@ async def test_risk_keyword_crud_reprocesses_existing_communications(session) ->
         assert processes_after_delete[0]["highest_risk_level"] is None
 
 
+async def test_process_phase_keywords_configure_process_progress(session) -> None:
+    async with api_client() as client:
+        create_response = await client.post("/api/clients", json={"name": "Joao da Silva"})
+        assert create_response.status_code == 201
+        created = create_response.json()
+
+    db_client = await session.get(Client, created["id"])
+    importer = DjenImporter(session, FakeDjenClient([]), sleep=noop_sleep, rate_limit_sleep_seconds=0)
+    await importer.import_items(db_client, [djen_item(901)])
+    await session.commit()
+
+    async with api_client() as client:
+        defaults_response = await client.get("/api/process-phase-keywords")
+        assert defaults_response.status_code == 200
+        defaults = defaults_response.json()
+        default_phase_names = {keyword["phase_name"] for keyword in defaults}
+        assert "Peticao inicial e distribuicao" in default_phase_names
+        assert "Penhora e constricao" in default_phase_names
+        assert "Recursos" in default_phase_names
+        assert any(keyword["term"] == "intimacao" and keyword["match_count"] >= 1 for keyword in defaults)
+
+        process_page_response = await client.get(
+            "/api/processes/page",
+            params={"client_id": created["id"], "page": 1, "page_size": 10},
+        )
+        assert process_page_response.status_code == 200
+        process_item = process_page_response.json()["items"][0]
+        assert process_item["current_phase"]["phase_name"] == "Citacao e intimacao"
+        assert process_item["phase_matches_count"] >= 1
+
+        create_keyword = await client.post(
+            "/api/process-phase-keywords",
+            json={
+                "term": "prazo de 10 dias",
+                "phase_name": "Prazos internos",
+                "phase_order": 35,
+                "description": "Controle de prazo localizado em movimentacoes",
+                "active": True,
+            },
+        )
+        assert create_keyword.status_code == 201
+        custom_keyword = create_keyword.json()
+        assert custom_keyword["phase_key"] == "prazos_internos"
+        assert custom_keyword["match_count"] == 1
+
+        detail_response = await client.get(f"/api/processes/{process_item['id']}")
+        assert detail_response.status_code == 200
+        detail = detail_response.json()
+        assert detail["current_phase"]["phase_name"] == "Prazos internos"
+        assert any(match["keyword"] == "prazo de 10 dias" for match in detail["phase_matches"])
+
+        disable_keyword = await client.patch(
+            f"/api/process-phase-keywords/{custom_keyword['id']}",
+            json={"active": False},
+        )
+        assert disable_keyword.status_code == 200
+        assert disable_keyword.json()["match_count"] == 0
+
+        detail_after_disable = (await client.get(f"/api/processes/{process_item['id']}")).json()
+        assert detail_after_disable["current_phase"]["phase_name"] == "Citacao e intimacao"
+        assert all(match["keyword"] != "prazo de 10 dias" for match in detail_after_disable["phase_matches"])
+
+
 async def test_worker_dashboard_start_and_stop_endpoints(session) -> None:
     db_client = Client(name="Joao da Silva", normalized_name="JOAO DA SILVA", cpf=None)
     session.add(db_client)

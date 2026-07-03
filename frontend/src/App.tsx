@@ -28,6 +28,7 @@ import {
   Save,
   Search,
   ServerCog,
+  Settings,
   ShieldAlert,
   ShieldCheck,
   Square,
@@ -45,9 +46,11 @@ import {
 
 import {
   createClient,
+  createProcessPhaseKeyword,
   createRiskKeyword,
   createSearchRun,
   deleteClient,
+  deleteProcessPhaseKeyword,
   deleteRiskKeyword,
   enrichProcess,
   exportUrl,
@@ -56,12 +59,15 @@ import {
   getSearchRun,
   getWorkerDashboard,
   listClients,
+  listProcessPhaseKeywords,
   listProcessesPage,
   listRiskKeywords,
   reprocessRiskKeywords,
+  restoreProcessPhaseDefaults,
   startWorker,
   stopWorker,
   updateClient,
+  updateProcessPhaseKeyword,
   updateRiskKeyword,
 } from "./api";
 import { cn } from "./lib/cn";
@@ -74,6 +80,8 @@ import type {
   ProcessFilterOptions,
   ProcessListItem,
   ProcessPageFilters,
+  ProcessPhaseKeyword,
+  ProcessPhaseKeywordPayload,
   ProcessParty,
   RiskKeyword,
   RiskKeywordPayload,
@@ -93,6 +101,7 @@ const navItems = [
   { to: "/riscos", label: "Riscos", icon: ShieldAlert },
   { to: "/workers", label: "Robos", icon: ServerCog },
   { to: "/exportacoes", label: "Exportacoes", icon: FileDown },
+  { to: "/configuracoes", label: "Configuracoes", icon: Settings },
 ];
 
 const riskLevelOptions: Array<{ value: RiskLevel; label: string }> = [
@@ -140,6 +149,13 @@ type RiskAutomationState = {
   status: "idle" | "pending" | "running" | "completed" | "failed";
   result: RiskReprocess | null;
   error: string | null;
+};
+
+type PhaseKeywordGroup = {
+  phaseKey: string;
+  phaseName: string;
+  phaseOrder: number;
+  keywords: ProcessPhaseKeyword[];
 };
 
 const searchPeriodOptions: Array<{ value: SearchPeriodPreset; label: string }> = [
@@ -216,6 +232,7 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ["processes"] });
       queryClient.invalidateQueries({ queryKey: ["processes-page"] });
       queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
+      queryClient.invalidateQueries({ queryKey: ["process-phase-keywords"] });
     },
     onError: (error) => {
       setRiskAutomation((current) => ({
@@ -237,6 +254,7 @@ export default function App() {
     queryClient.invalidateQueries({ queryKey: ["processes"] });
     queryClient.invalidateQueries({ queryKey: ["processes-page"] });
     queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
+    queryClient.invalidateQueries({ queryKey: ["process-phase-keywords"] });
 
     if (activeSearchOptions?.openMovementsWhenDone) {
       navigate("/movimentacoes");
@@ -358,6 +376,7 @@ export default function App() {
               />
             }
           />
+          <Route path="/configuracoes" element={<SettingsView />} />
         </Routes>
       </div>
     </main>
@@ -422,6 +441,7 @@ function ClientsView({
       queryClient.invalidateQueries({ queryKey: ["processes"] });
       queryClient.invalidateQueries({ queryKey: ["processes-page"] });
       queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
+      queryClient.invalidateQueries({ queryKey: ["process-phase-keywords"] });
       if (selectedClientId === deletedClient.id) {
         onSelectClient(remainingClients[0]?.id ?? null);
       }
@@ -728,6 +748,11 @@ function ProcessesView({
         cell: ({ row }) => <ProcessParties parties={row.original.process_parties} compact />,
       },
       {
+        header: "Fase",
+        accessorKey: "current_phase",
+        cell: ({ row }) => <ProcessPhaseSummary process={row.original} compact />,
+      },
+      {
         header: "Risco",
         accessorKey: "highest_risk_level",
         cell: ({ row }) => <ProcessRiskSummary process={row.original} compact />,
@@ -904,7 +929,7 @@ function ProcessesView({
           <LoadingState label="Carregando processos" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1160px] border-separate border-spacing-0 text-left text-sm">
+            <table className="w-full min-w-[1280px] border-separate border-spacing-0 text-left text-sm">
               <thead>
                 {table.getHeaderGroups().map((headerGroup) => (
                   <tr key={headerGroup.id}>
@@ -1029,6 +1054,7 @@ function MovementsView({
       queryClient.invalidateQueries({ queryKey: ["processes"] });
       queryClient.invalidateQueries({ queryKey: ["processes-page"] });
       queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
+      queryClient.invalidateQueries({ queryKey: ["process-phase-keywords"] });
       queryClient.invalidateQueries({ queryKey: ["clients"] });
     },
   });
@@ -1074,6 +1100,7 @@ function MovementsView({
                 <div className="h-stack flex-wrap gap-2">
                   <Badge>{process.tribunal ?? "Tribunal ausente"}</Badge>
                   <ProcessDataStatusBadge status={process.datajud_status} />
+                  <ProcessPhaseSummary process={process} compact />
                   <ProcessRiskSummary process={process} compact />
                 </div>
               </button>
@@ -1175,6 +1202,7 @@ function RiskManagementView() {
     queryClient.invalidateQueries({ queryKey: ["processes"] });
     queryClient.invalidateQueries({ queryKey: ["processes-page"] });
     queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
+    queryClient.invalidateQueries({ queryKey: ["process-phase-keywords"] });
     queryClient.invalidateQueries({ queryKey: ["process"] });
   }
 
@@ -1371,6 +1399,294 @@ function RiskManagementView() {
         )}
       </Panel>
     </section>
+  );
+}
+
+function SettingsView() {
+  const [activeTab, setActiveTab] = useState<"fases" | "padroes">("fases");
+
+  return (
+    <section className="v-stack gap-4 py-5">
+      <div className="h-stack flex-wrap gap-2">
+        <button
+          className={cn("ui-tab h-stack items-center gap-2", { "ui-tab-active": activeTab === "fases" })}
+          type="button"
+          onClick={() => setActiveTab("fases")}
+        >
+          <Tags size={17} aria-hidden="true" />
+          Fases processuais
+        </button>
+        <button
+          className={cn("ui-tab h-stack items-center gap-2", { "ui-tab-active": activeTab === "padroes" })}
+          type="button"
+          onClick={() => setActiveTab("padroes")}
+        >
+          <Settings size={17} aria-hidden="true" />
+          Padroes de execucao
+        </button>
+      </div>
+      {activeTab === "fases" ? <ProcessPhaseSettingsPanel /> : <ExecutionPhaseDefaultsPanel />}
+    </section>
+  );
+}
+
+function ProcessPhaseSettingsPanel() {
+  const queryClient = useQueryClient();
+  const [form, setForm] = useState<ProcessPhaseKeywordPayload>(defaultPhaseKeywordForm());
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<ProcessPhaseKeywordPayload>(defaultPhaseKeywordForm());
+
+  const phaseKeywordsQuery = useQuery({
+    queryKey: ["process-phase-keywords"],
+    queryFn: listProcessPhaseKeywords,
+  });
+  const keywords = phaseKeywordsQuery.data ?? [];
+  const phaseOptions = uniqueOptions(keywords.map((keyword) => keyword.phase_name));
+  const groups = phaseKeywordGroups(keywords);
+
+  function invalidatePhaseData() {
+    queryClient.invalidateQueries({ queryKey: ["process-phase-keywords"] });
+    queryClient.invalidateQueries({ queryKey: ["processes"] });
+    queryClient.invalidateQueries({ queryKey: ["processes-page"] });
+    queryClient.invalidateQueries({ queryKey: ["process"] });
+  }
+
+  const createMutation = useMutation({
+    mutationFn: createProcessPhaseKeyword,
+    onSuccess: () => {
+      setForm(defaultPhaseKeywordForm());
+      invalidatePhaseData();
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: ProcessPhaseKeywordPayload }) =>
+      updateProcessPhaseKeyword(id, payload),
+    onSuccess: () => {
+      setEditingId(null);
+      invalidatePhaseData();
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: deleteProcessPhaseKeyword,
+    onSuccess: () => {
+      setEditingId(null);
+      invalidatePhaseData();
+    },
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: restoreProcessPhaseDefaults,
+    onSuccess: () => {
+      invalidatePhaseData();
+    },
+  });
+
+  function submitNewKeyword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    createMutation.mutate(normalizePhasePayload(form));
+  }
+
+  function startEdit(keyword: ProcessPhaseKeyword) {
+    setEditingId(keyword.id);
+    setEditForm({
+      term: keyword.term,
+      phase_name: keyword.phase_name,
+      phase_order: keyword.phase_order,
+      description: keyword.description ?? "",
+      active: keyword.active,
+    });
+  }
+
+  function submitEdit(event: FormEvent<HTMLFormElement>, keywordId: string) {
+    event.preventDefault();
+    updateMutation.mutate({ id: keywordId, payload: normalizePhasePayload(editForm) });
+  }
+
+  return (
+    <section className="grid gap-4 xl:grid-cols-[minmax(320px,420px)_1fr]">
+      <Panel title="Nova palavra de fase" icon={<Tags size={18} />}>
+        <form className="v-stack gap-3" onSubmit={submitNewKeyword}>
+          <PhaseKeywordFields
+            value={form}
+            phaseOptions={phaseOptions}
+            listId="phase-name-options-new"
+            onChange={setForm}
+          />
+          <button
+            className="ui-button ui-button-primary h-stack items-center gap-2"
+            type="submit"
+            disabled={createMutation.isPending}
+          >
+            {createMutation.isPending ? (
+              <Loader2 className="animate-spin" size={17} aria-hidden="true" />
+            ) : (
+              <Plus size={17} aria-hidden="true" />
+            )}
+            Cadastrar palavra
+          </button>
+          <MutationError error={createMutation.error} />
+        </form>
+
+        <div className="grid gap-2 border-t border-line pt-4 sm:grid-cols-3">
+          <Metric label="Fases" value={groups.length} />
+          <Metric label="Ativas" value={keywords.filter((keyword) => keyword.active).length} />
+          <Metric label="Evidencias" value={keywords.reduce((total, keyword) => total + keyword.match_count, 0)} />
+        </div>
+
+        <div className="v-stack gap-3 border-t border-line pt-4">
+          <button
+            className="ui-button h-stack items-center gap-2"
+            type="button"
+            disabled={restoreMutation.isPending}
+            onClick={() => restoreMutation.mutate()}
+          >
+            {restoreMutation.isPending ? (
+              <Loader2 className="animate-spin" size={17} aria-hidden="true" />
+            ) : (
+              <RotateCw size={17} aria-hidden="true" />
+            )}
+            Restaurar padroes
+          </button>
+          <MutationError error={restoreMutation.error} />
+        </div>
+      </Panel>
+
+      <Panel title="Palavras por fase" icon={<ListFilter size={18} />}>
+        {phaseKeywordsQuery.isLoading ? (
+          <LoadingState label="Carregando fases" />
+        ) : keywords.length === 0 ? (
+          <EmptyState label="Nenhuma fase configurada." />
+        ) : (
+          <div className="v-stack gap-4">
+            {groups.map((group) => (
+              <section key={group.phaseKey} className="v-stack gap-2 border-b border-line pb-4 last:border-b-0 last:pb-0">
+                <div className="h-stack flex-wrap items-center gap-2">
+                  <h3 className="text-sm font-semibold">{group.phaseName}</h3>
+                  <Badge>Ordem {group.phaseOrder}</Badge>
+                  <Badge>{group.keywords.length} termos</Badge>
+                </div>
+                <div className="v-stack gap-2">
+                  {group.keywords.map((keyword) => {
+                    const isEditing = editingId === keyword.id;
+                    return (
+                      <article key={keyword.id} className="ui-list-item v-stack gap-3">
+                        {isEditing ? (
+                          <form className="v-stack gap-3" onSubmit={(event) => submitEdit(event, keyword.id)}>
+                            <PhaseKeywordFields
+                              value={editForm}
+                              phaseOptions={phaseOptions}
+                              listId={`phase-name-options-${keyword.id}`}
+                              onChange={setEditForm}
+                            />
+                            <div className="h-stack flex-wrap gap-2">
+                              <button
+                                className="ui-button ui-button-primary h-stack items-center gap-2"
+                                type="submit"
+                                disabled={updateMutation.isPending}
+                              >
+                                {updateMutation.isPending ? (
+                                  <Loader2 className="animate-spin" size={17} aria-hidden="true" />
+                                ) : (
+                                  <Save size={17} aria-hidden="true" />
+                                )}
+                                Salvar
+                              </button>
+                              <button className="ui-button" type="button" onClick={() => setEditingId(null)}>
+                                Cancelar
+                              </button>
+                            </div>
+                            <MutationError error={updateMutation.error} />
+                          </form>
+                        ) : (
+                          <>
+                            <div className="h-stack flex-wrap items-start gap-3">
+                              <div className="min-w-0 grow">
+                                <div className="h-stack flex-wrap items-center gap-2">
+                                  <span className="break-words text-base font-semibold">{keyword.term}</span>
+                                  <Badge>{keyword.phase_name}</Badge>
+                                  {keyword.is_default && <Badge>Padrao</Badge>}
+                                  {keyword.active ? (
+                                    <span className="h-stack items-center gap-1 text-xs font-semibold text-success">
+                                      <ShieldCheck size={14} aria-hidden="true" />
+                                      Ativa
+                                    </span>
+                                  ) : (
+                                    <span className="text-xs font-semibold text-neutral-500">Inativa</span>
+                                  )}
+                                </div>
+                                {keyword.description && (
+                                  <p className="mt-2 text-sm leading-6 text-neutral-700">{keyword.description}</p>
+                                )}
+                              </div>
+                              <div className="h-stack shrink-0 gap-2">
+                                <button className="ui-button" type="button" onClick={() => startEdit(keyword)}>
+                                  Editar
+                                </button>
+                                <button
+                                  className="ui-icon-button text-danger hover:text-danger"
+                                  type="button"
+                                  title="Excluir palavra"
+                                  disabled={deleteMutation.isPending}
+                                  onClick={() => deleteMutation.mutate(keyword.id)}
+                                >
+                                  <Trash2 size={16} aria-hidden="true" />
+                                </button>
+                              </div>
+                            </div>
+                            <div className="h-stack flex-wrap gap-2 text-xs text-neutral-600">
+                              <Badge>{keyword.match_count} evidencias</Badge>
+                              <span>Atualizada em {formatDateTime(keyword.updated_at)}</span>
+                            </div>
+                          </>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+            <MutationError error={deleteMutation.error} />
+          </div>
+        )}
+      </Panel>
+    </section>
+  );
+}
+
+function ExecutionPhaseDefaultsPanel() {
+  const phaseKeywordsQuery = useQuery({
+    queryKey: ["process-phase-keywords"],
+    queryFn: listProcessPhaseKeywords,
+  });
+  const defaults = (phaseKeywordsQuery.data ?? []).filter((keyword) => keyword.is_default);
+  const groups = phaseKeywordGroups(defaults);
+
+  return (
+    <Panel title="Padroes de execucao" icon={<Settings size={18} />}>
+      {phaseKeywordsQuery.isLoading ? (
+        <LoadingState label="Carregando padroes" />
+      ) : groups.length === 0 ? (
+        <EmptyState label="Nenhum padrao configurado." />
+      ) : (
+        <div className="grid gap-3 md:grid-cols-2">
+          {groups.map((group) => (
+            <article key={group.phaseKey} className="ui-list-item v-stack gap-2">
+              <div className="h-stack flex-wrap items-center gap-2">
+                <span className="font-semibold">{group.phaseName}</span>
+                <Badge>Ordem {group.phaseOrder}</Badge>
+              </div>
+              <div className="h-stack flex-wrap gap-2">
+                {group.keywords.map((keyword) => (
+                  <Badge key={keyword.id}>{keyword.term}</Badge>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }
 
@@ -1880,6 +2196,93 @@ function RiskKeywordFields({
   );
 }
 
+function PhaseKeywordFields({
+  value,
+  phaseOptions,
+  listId,
+  onChange,
+}: {
+  value: ProcessPhaseKeywordPayload;
+  phaseOptions: string[];
+  listId: string;
+  onChange: (value: ProcessPhaseKeywordPayload) => void;
+}) {
+  return (
+    <>
+      <label className="v-stack gap-1 text-sm font-medium">
+        Palavra-chave
+        <input
+          className="ui-input"
+          value={value.term}
+          onChange={(event) => onChange({ ...value, term: event.target.value })}
+          minLength={2}
+          maxLength={255}
+          placeholder="Ex.: penhora, agravo de instrumento"
+          required
+        />
+      </label>
+      <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+        <label className="v-stack gap-1 text-sm font-medium">
+          Fase
+          <input
+            className="ui-input"
+            list={listId}
+            value={value.phase_name}
+            onChange={(event) => onChange({ ...value, phase_name: event.target.value })}
+            minLength={2}
+            maxLength={120}
+            required
+          />
+        </label>
+        <label className="v-stack gap-1 text-sm font-medium">
+          Ordem
+          <input
+            className="ui-input"
+            type="number"
+            min={1}
+            max={999}
+            value={value.phase_order}
+            onChange={(event) => onChange({ ...value, phase_order: Number(event.target.value) })}
+            required
+          />
+        </label>
+      </div>
+      <datalist id={listId}>
+        {phaseOptions.map((option) => (
+          <option key={option} value={option} />
+        ))}
+        <option value="Peticao inicial e distribuicao" />
+        <option value="Citacao e intimacao" />
+        <option value="Defesa e embargos" />
+        <option value="Decisoes e despachos" />
+        <option value="Penhora e constricao" />
+        <option value="Avaliacao e expropriacao" />
+        <option value="Acordo e pagamento" />
+        <option value="Recursos" />
+        <option value="Sentenca e encerramento" />
+      </datalist>
+      <label className="v-stack gap-1 text-sm font-medium">
+        Observacao
+        <textarea
+          className="ui-input min-h-24 resize-y"
+          value={value.description ?? ""}
+          onChange={(event) => onChange({ ...value, description: event.target.value })}
+          maxLength={1000}
+        />
+      </label>
+      <label className="h-stack items-center gap-2 text-sm font-medium">
+        <input
+          className="h-4 w-4 accent-brand-600"
+          type="checkbox"
+          checked={value.active}
+          onChange={(event) => onChange({ ...value, active: event.target.checked })}
+        />
+        Incluir na classificacao
+      </label>
+    </>
+  );
+}
+
 function RiskLevelSelect({
   value,
   onChange,
@@ -2000,6 +2403,7 @@ function ProcessSummary({ detail }: { detail: ProcessDetail }) {
       <Metric label="Ultima" value={formatDate(detail.last_movement_at)} />
       <div className="v-stack gap-2 md:col-span-4">
         <ProcessParties parties={detail.process_parties} />
+        <ProcessPhaseSummary process={detail} />
         <ProcessRiskSummary process={detail} />
         <div className="h-stack flex-wrap gap-2">
           {detail.external_link && (
@@ -2306,6 +2710,56 @@ function ProcessRiskSummary({ process, compact = false }: { process: ProcessList
         <div className="h-stack flex-wrap gap-2">
           {visibleMatches.map((match) => (
             <Badge key={match.id}>{match.keyword}</Badge>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProcessPhaseSummary({ process, compact = false }: { process: ProcessListItem; compact?: boolean }) {
+  const current = process.current_phase;
+  if (!current) {
+    return compact ? (
+      <span className="rounded-md border border-neutral-200 bg-neutral-50 px-2 py-1 text-xs font-semibold text-neutral-600">
+        Fase ausente
+      </span>
+    ) : (
+      <div className="h-stack items-center gap-2 text-sm text-neutral-600">
+        <Clock3 size={16} aria-hidden="true" />
+        Fase processual nao identificada
+      </div>
+    );
+  }
+
+  if (compact) {
+    return (
+      <span className="rounded-md border border-blue-200 bg-brand-50 px-2 py-1 text-xs font-semibold text-brand-700">
+        {current.phase_name}
+      </span>
+    );
+  }
+
+  const visibleMatches = process.phase_matches.slice(0, 4);
+  return (
+    <div className="v-stack gap-2 rounded-md border border-blue-200 bg-brand-50 p-3">
+      <div className="h-stack flex-wrap items-center gap-2">
+        <Clock3 size={16} className="text-brand-700" aria-hidden="true" />
+        <span className="text-sm font-semibold text-ink">{current.phase_name}</span>
+        <Badge>{process.phase_matches_count} evidencias</Badge>
+        <span className="text-xs text-neutral-600">{formatDateTime(current.occurred_at)}</span>
+      </div>
+      {visibleMatches.length > 0 && (
+        <div className="v-stack gap-2">
+          {visibleMatches.map((match) => (
+            <div key={`${match.keyword_id}-${match.source}-${match.occurred_at}`} className="v-stack gap-1 rounded-md bg-white/80 p-2 text-sm">
+              <div className="h-stack flex-wrap items-center gap-2">
+                <Badge>{match.keyword}</Badge>
+                <span className="text-xs text-neutral-600">{phaseSourceLabel(match.source)}</span>
+                <span className="text-xs text-neutral-600">{formatDateTime(match.occurred_at)}</span>
+              </div>
+              <p className="leading-6 text-neutral-700">{match.excerpt}</p>
+            </div>
           ))}
         </div>
       )}
@@ -2653,6 +3107,7 @@ function highlightTerms(detail: ProcessDetail, client: Client | null): string[] 
     client?.name ?? "",
     ...detail.process_parties.map((party) => party.name),
     ...detail.risk_matches.map((match) => match.keyword),
+    ...detail.phase_matches.map((match) => match.keyword),
     detail.formatted_number,
     detail.numero_processo,
     "prazo",
@@ -2716,6 +3171,16 @@ function defaultRiskForm(): RiskKeywordPayload {
     term: "",
     category: "Geral",
     risk_level: "medio",
+    description: "",
+    active: true,
+  };
+}
+
+function defaultPhaseKeywordForm(): ProcessPhaseKeywordPayload {
+  return {
+    term: "",
+    phase_name: "Penhora e constricao",
+    phase_order: 50,
     description: "",
     active: true,
   };
@@ -2832,6 +3297,16 @@ function normalizeRiskPayload(payload: RiskKeywordPayload): RiskKeywordPayload {
   };
 }
 
+function normalizePhasePayload(payload: ProcessPhaseKeywordPayload): ProcessPhaseKeywordPayload {
+  return {
+    term: payload.term.trim(),
+    phase_name: payload.phase_name.trim(),
+    phase_order: Math.max(1, Math.min(999, Number(payload.phase_order) || 10)),
+    description: payload.description?.trim() || null,
+    active: payload.active,
+  };
+}
+
 function normalizeWorkerPayload(payload: WorkerStartPayload): WorkerStartPayload {
   return {
     name: payload.name?.trim() || null,
@@ -2852,6 +3327,29 @@ function workerRunProgress(currentDate: string | null, startDate: string, endDat
 
 function uniqueOptions(values: Array<string | null | undefined> | undefined): string[] {
   return Array.from(new Set((values ?? []).filter((value): value is string => Boolean(value)))).sort();
+}
+
+function phaseKeywordGroups(keywords: ProcessPhaseKeyword[]): PhaseKeywordGroup[] {
+  const groups = new Map<string, PhaseKeywordGroup>();
+  for (const keyword of keywords) {
+    const current = groups.get(keyword.phase_key);
+    if (current) {
+      current.keywords.push(keyword);
+      continue;
+    }
+    groups.set(keyword.phase_key, {
+      phaseKey: keyword.phase_key,
+      phaseName: keyword.phase_name,
+      phaseOrder: keyword.phase_order,
+      keywords: [keyword],
+    });
+  }
+  return Array.from(groups.values())
+    .map((group) => ({
+      ...group,
+      keywords: group.keywords.sort((first, second) => first.term.localeCompare(second.term)),
+    }))
+    .sort((first, second) => first.phaseOrder - second.phaseOrder || first.phaseName.localeCompare(second.phaseName));
 }
 
 function normalizeProcessFilters(filters: ProcessPageFilters): ProcessPageFilters {
@@ -2936,6 +3434,25 @@ function riskSourceLabel(source: string): string {
   }
   if (source === "metadados") {
     return "Metadados";
+  }
+  return source;
+}
+
+function phaseSourceLabel(source: string): string {
+  if (source === "djen_texto") {
+    return "DJEN texto";
+  }
+  if (source === "djen_metadados") {
+    return "DJEN metadados";
+  }
+  if (source === "djen_partes") {
+    return "DJEN partes";
+  }
+  if (source === "datajud_movimento") {
+    return "DataJud movimento";
+  }
+  if (source === "datajud_metadados") {
+    return "DataJud metadados";
   }
   return source;
 }
