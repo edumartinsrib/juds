@@ -62,7 +62,7 @@ def parse_djen_date(value: Any) -> date:
         return value.date()
     text = str(value or "").strip()
     if not text:
-        raise ValueError("Data do DJEN ausente")
+        raise ValueError("Data da movimentacao ausente")
     return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
 
 

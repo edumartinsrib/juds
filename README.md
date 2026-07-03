@@ -1,17 +1,18 @@
 # JUDS
 
-Consulta local de comunicações do DJEN por pessoa com enriquecimento DataJud por processo, backend FastAPI, worker de importação, PostgreSQL via Docker Compose e frontend React/Vite.
+Gestao local de processos, movimentacoes e informacoes complementares por pessoa, com backend FastAPI, worker de importacao, PostgreSQL via Docker Compose e frontend React/Vite.
 
 ## Escopo
 
-- Busca pública no DJEN em `GET /api/v1/comunicacao` usando `nomeParte`, janela incremental padrão de 30 dias e paginação diária com `itensPorPagina=100`.
-- Enriquecimento DataJud por `numeroProcesso` nos endpoints públicos `POST /api_publica_{tribunal}/_search`.
+- Busca publica de movimentacoes por `nomeParte`, janela incremental padrao de 30 dias e paginacao diaria.
+- Enriquecimento por `numeroProcesso` com informacoes complementares do processo.
 - Persistência de clientes, execuções de busca, processos, comunicações, partes e advogados.
-- Persistência de capa, classe, órgão, assuntos, grau, sistema, sigilo e movimentos DataJud no processo.
-- Enriquecimento processo a processo por número exato, combinando refresh DataJud com busca retroativa no DJEN.
+- Persistência de capa, classe, órgão, assuntos, grau, sistema, sigilo e historico complementar no processo.
+- Atualizacao processo a processo por numero exato, combinando dados complementares com busca retroativa de movimentacoes.
 - Gestão de palavras-chave de risco com severidade, categoria, evidência por trecho e reprocessamento das comunicações já importadas.
-- CPF é normalizado no backend, mascarado na interface e nunca inferido quando o DJEN não o informa.
-- Texto HTML/XML do DJEN é convertido para texto seguro e o conteúdo bruto é preservado para auditoria.
+- Controle de robos de busca com registro de instâncias, sinal de atividade, busca atual, início sob demanda pela API e solicitação de parada.
+- CPF é normalizado no backend, mascarado na interface e nunca inferido quando a fonte não o informa.
+- Texto HTML/XML importado é convertido para texto seguro e o conteúdo bruto é preservado para auditoria.
 - Exportação em CSV e XLSX.
 
 ## Rodando Localmente
@@ -21,8 +22,8 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Configure `DATAJUD_API_KEY` no `.env` local para habilitar o enriquecimento DataJud. O `.env.example` mantém apenas o placeholder da chave.
-`PROCESS_ENRICHMENT_WINDOW_DAYS` define a janela retroativa padrão da busca por número de processo quando a data de ajuizamento DataJud não estiver disponível.
+Configure `DATAJUD_API_KEY` no `.env` local para habilitar o enriquecimento complementar. O `.env.example` mantém apenas o placeholder da chave.
+`PROCESS_ENRICHMENT_WINDOW_DAYS` define a janela retroativa padrão da busca por número de processo quando a data de ajuizamento não estiver disponível.
 
 Serviços:
 
@@ -56,6 +57,9 @@ npm run build
 - `GET /api/clients`
 - `POST /api/clients/{id}/search-runs`
 - `GET /api/search-runs/{id}`
+- `GET /api/workers`
+- `POST /api/workers`
+- `POST /api/workers/{id}/stop`
 - `GET /api/processes?client_id=...`
 - `GET /api/processes/{id}`
 - `POST /api/processes/{id}/enrich`

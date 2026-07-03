@@ -58,6 +58,70 @@ class SearchRunRead(BaseModel):
     finished_at: datetime | None
 
 
+class WorkerStartCreate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    max_jobs: int | None = Field(default=None, ge=1, le=100)
+    poll_interval_seconds: int = Field(default=5, ge=1, le=60)
+
+    @field_validator("name")
+    @classmethod
+    def strip_worker_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        name = " ".join(value.strip().split())
+        return name or None
+
+
+class WorkerRunRead(BaseModel):
+    id: str
+    client_id: str
+    client_name: str
+    status: str
+    start_date: date
+    end_date: date
+    current_date: date | None
+    current_page: int
+    total_imported: int
+    rate_limit_limit: int | None
+    rate_limit_remaining: int | None
+    error_message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class WorkerRead(BaseModel):
+    id: str
+    name: str
+    kind: str
+    status: str
+    effective_status: str
+    hostname: str | None
+    process_id: int | None
+    started_at: datetime | None
+    heartbeat_at: datetime | None
+    stopped_at: datetime | None
+    last_seen_seconds: int | None
+    stop_requested: bool
+    processed_runs: int
+    poll_interval_seconds: int
+    last_error: str | None
+    current_run: WorkerRunRead | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkerDashboardRead(BaseModel):
+    workers: list[WorkerRead]
+    active_workers: int
+    working_workers: int
+    idle_workers: int
+    stale_workers: int
+    queued_runs: int
+    running_runs: int
+    failed_runs: int
+
+
 class RiskKeywordCreate(BaseModel):
     term: str = Field(min_length=2, max_length=255)
     category: str = Field(default="Geral", min_length=2, max_length=80)

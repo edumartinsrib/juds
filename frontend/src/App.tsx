@@ -8,6 +8,7 @@ import {
   CalendarDays,
   CheckCircle2,
   Clock3,
+  Cpu,
   Download,
   ExternalLink,
   FileDown,
@@ -16,12 +17,15 @@ import {
   ListFilter,
   Loader2,
   Plus,
+  Power,
   RefreshCw,
   RotateCw,
   Save,
   Search,
+  ServerCog,
   ShieldAlert,
   ShieldCheck,
+  Square,
   Tags,
   Trash2,
   Users,
@@ -42,10 +46,13 @@ import {
   exportUrl,
   getProcess,
   getSearchRun,
+  getWorkerDashboard,
   listClients,
   listProcesses,
   listRiskKeywords,
   reprocessRiskKeywords,
+  startWorker,
+  stopWorker,
   updateRiskKeyword,
 } from "./api";
 import { cn } from "./lib/cn";
@@ -62,6 +69,9 @@ import type {
   RiskMatch,
   RiskReprocess,
   SearchRun,
+  WorkerDashboard,
+  WorkerInstance,
+  WorkerStartPayload,
 } from "./types";
 
 const navItems = [
@@ -69,6 +79,7 @@ const navItems = [
   { to: "/processos", label: "Processos", icon: BriefcaseBusiness },
   { to: "/movimentacoes", label: "Movimentacoes", icon: Gavel },
   { to: "/riscos", label: "Riscos", icon: ShieldAlert },
+  { to: "/workers", label: "Robos", icon: ServerCog },
   { to: "/exportacoes", label: "Exportacoes", icon: FileDown },
 ];
 
@@ -78,6 +89,17 @@ const riskLevelOptions: Array<{ value: RiskLevel; label: string }> = [
   { value: "alto", label: "Alto" },
   { value: "critico", label: "Critico" },
 ];
+
+const emptyWorkerDashboard: WorkerDashboard = {
+  workers: [],
+  active_workers: 0,
+  working_workers: 0,
+  idle_workers: 0,
+  stale_workers: 0,
+  queued_runs: 0,
+  running_runs: 0,
+  failed_runs: 0,
+};
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -130,7 +152,7 @@ export default function App() {
             <div className="min-w-0">
               <h1 className="truncate text-xl font-semibold">JUDS</h1>
               <p className="truncate text-sm text-neutral-600">
-                Consulta DJEN por pessoa e processo
+                Gestao de processos e movimentacoes
               </p>
             </div>
           </div>
@@ -192,6 +214,7 @@ export default function App() {
             }
           />
           <Route path="/riscos" element={<RiskManagementView />} />
+          <Route path="/workers" element={<WorkersView />} />
           <Route
             path="/exportacoes"
             element={
@@ -293,7 +316,7 @@ function ClientsView({
             ) : (
               <Search size={17} aria-hidden="true" />
             )}
-            Buscar no DJEN
+            Buscar movimentacoes
           </button>
           <MutationError error={searchMutation.error} />
           <RunStatus run={activeRun} />
@@ -398,9 +421,9 @@ function ProcessesView({
         cell: ({ row }) => <Badge>{row.original.tribunal ?? "Sem tribunal"}</Badge>,
       },
       {
-        header: "DataJud",
+        header: "Dados",
         accessorKey: "datajud_status",
-        cell: ({ row }) => <DataJudStatusBadge status={row.original.datajud_status} />,
+        cell: ({ row }) => <ProcessDataStatusBadge status={row.original.datajud_status} />,
       },
       {
         header: "Ultima",
@@ -618,7 +641,7 @@ function MovementsView({
               <ProcessParties parties={process.process_parties} compact />
               <div className="h-stack flex-wrap gap-2">
                 <Badge>{process.tribunal ?? "Tribunal ausente"}</Badge>
-                <DataJudStatusBadge status={process.datajud_status} />
+                <ProcessDataStatusBadge status={process.datajud_status} />
                 <ProcessRiskSummary process={process} compact />
               </div>
             </button>
@@ -635,7 +658,7 @@ function MovementsView({
         ) : detail ? (
           <div className="v-stack gap-4">
             <ProcessSummary detail={detail} />
-            <DataJudSummary
+            <ProcessInformationPanel
               detail={detail}
               enrichmentStartDate={enrichmentStartDate}
               enrichmentEndDate={enrichmentEndDate}
@@ -646,7 +669,7 @@ function MovementsView({
               onEnrichmentEndDateChange={setEnrichmentEndDate}
               onEnrich={() => selectedProcessId && enrichMutation.mutate()}
             />
-            <DataJudMovements detail={detail} />
+            <ComplementaryMovements detail={detail} />
             <div className="grid gap-3 md:grid-cols-4">
               <SelectFilter label="Tipo" value={typeFilter} options={typeOptions} onChange={setTypeFilter} />
               <SelectFilter
@@ -660,7 +683,7 @@ function MovementsView({
             </div>
             <div className="v-stack gap-3">
               <div className="h-stack flex-wrap items-center gap-2">
-                <h3 className="text-sm font-semibold">Comunicacoes DJEN</h3>
+                <h3 className="text-sm font-semibold">Movimentacoes</h3>
                 <Badge>{filteredTimeline.length}</Badge>
               </div>
               {filteredTimeline.map((communication) => (
@@ -794,7 +817,7 @@ function RiskManagementView() {
             ) : (
               <RotateCw size={17} aria-hidden="true" />
             )}
-            Reprocessar comunicacoes
+            Reprocessar movimentacoes
           </button>
           <MutationError error={reprocessMutation.error} />
           {lastReprocess && <RiskReprocessSummary result={lastReprocess} />}
@@ -805,7 +828,7 @@ function RiskManagementView() {
         {keywordsQuery.isLoading ? (
           <LoadingState label="Carregando palavras de risco" />
         ) : keywords.length === 0 ? (
-          <EmptyState label="Cadastre a primeira palavra para classificar comunicacoes." />
+          <EmptyState label="Cadastre a primeira palavra para classificar movimentacoes." />
         ) : (
           <div className="v-stack gap-3">
             {keywords.map((keyword) => {
@@ -881,6 +904,148 @@ function RiskManagementView() {
             })}
           </div>
         )}
+      </Panel>
+    </section>
+  );
+}
+
+function WorkersView() {
+  const queryClient = useQueryClient();
+  const [form, setForm] = useState<WorkerStartPayload>(defaultWorkerForm);
+  const workersQuery = useQuery({
+    queryKey: ["workers"],
+    queryFn: getWorkerDashboard,
+    refetchInterval: 3000,
+  });
+  const dashboard = workersQuery.data ?? emptyWorkerDashboard;
+
+  const startMutation = useMutation({
+    mutationFn: startWorker,
+    onSuccess: () => {
+      setForm(defaultWorkerForm());
+      queryClient.invalidateQueries({ queryKey: ["workers"] });
+    },
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: stopWorker,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["workers"] });
+    },
+  });
+
+  function submitWorker(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    startMutation.mutate(normalizeWorkerPayload(form));
+  }
+
+  return (
+    <section className="grid gap-4 py-5 xl:grid-cols-[minmax(320px,420px)_1fr]">
+      <Panel title="Controle" icon={<ServerCog size={18} />}>
+        <form className="v-stack gap-3" onSubmit={submitWorker}>
+          <label className="v-stack gap-1 text-sm font-medium">
+            Nome
+            <input
+              className="ui-input"
+              value={form.name ?? ""}
+              onChange={(event) => setForm({ ...form, name: event.target.value })}
+              minLength={2}
+              maxLength={120}
+              placeholder="robo-juridico-01"
+            />
+          </label>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="v-stack gap-1 text-sm font-medium">
+              Intervalo
+              <select
+                className="ui-input"
+                value={form.poll_interval_seconds}
+                onChange={(event) =>
+                  setForm({ ...form, poll_interval_seconds: Number(event.target.value) })
+                }
+              >
+                <option value={1}>1 segundo</option>
+                <option value={3}>3 segundos</option>
+                <option value={5}>5 segundos</option>
+                <option value={10}>10 segundos</option>
+                <option value={30}>30 segundos</option>
+              </select>
+            </label>
+            <label className="v-stack gap-1 text-sm font-medium">
+              Modo
+              <select
+                className="ui-input"
+                value={form.max_jobs ?? "continuous"}
+                onChange={(event) =>
+                  setForm({
+                    ...form,
+                    max_jobs: event.target.value === "continuous" ? null : Number(event.target.value),
+                  })
+                }
+              >
+                <option value="continuous">Continuo</option>
+                <option value={1}>Uma busca</option>
+                <option value={3}>Tres buscas</option>
+              </select>
+            </label>
+          </div>
+          <button
+            className="ui-button ui-button-primary h-stack items-center gap-2"
+            type="submit"
+            disabled={startMutation.isPending}
+          >
+            {startMutation.isPending ? (
+              <Loader2 className="animate-spin" size={17} aria-hidden="true" />
+            ) : (
+              <Power size={17} aria-hidden="true" />
+            )}
+            Iniciar robo
+          </button>
+          <MutationError error={startMutation.error} />
+        </form>
+
+        <WorkerQueueSummary dashboard={dashboard} />
+      </Panel>
+
+      <Panel title="Robos em execucao" icon={<Cpu size={18} />}>
+        <div className="h-stack flex-wrap items-center gap-2">
+          <button
+            className="ui-button h-stack items-center gap-2"
+            type="button"
+            onClick={() => workersQuery.refetch()}
+            disabled={workersQuery.isFetching}
+          >
+            <RefreshCw
+              className={cn({ "animate-spin": workersQuery.isFetching })}
+              size={17}
+              aria-hidden="true"
+            />
+            Atualizar
+          </button>
+          <WorkerStatusBadge status="working" label={`${dashboard.working_workers} trabalhando`} />
+          <WorkerStatusBadge status="idle" label={`${dashboard.idle_workers} aguardando`} />
+          {dashboard.stale_workers > 0 && (
+            <WorkerStatusBadge status="stale" label={`${dashboard.stale_workers} sem sinal`} />
+          )}
+        </div>
+
+        {workersQuery.isLoading ? (
+          <LoadingState label="Carregando robos" />
+        ) : dashboard.workers.length === 0 ? (
+          <EmptyState label="Nenhum robo registrado." />
+        ) : (
+          <div className="grid gap-3 2xl:grid-cols-2">
+            {dashboard.workers.map((worker) => (
+              <WorkerCard
+                key={worker.id}
+                worker={worker}
+                isStopping={stopMutation.isPending}
+                onStop={() => stopMutation.mutate(worker.id)}
+              />
+            ))}
+          </div>
+        )}
+        <MutationError error={stopMutation.error} />
       </Panel>
     </section>
   );
@@ -1084,8 +1249,8 @@ function RunStatus({ run }: { run: SearchRun | null }) {
     return null;
   }
   const isWorking = run.status === "queued" || run.status === "running";
-  const isWaitingForDjenWindow = isWorking && run.rate_limit_remaining === 0;
-  const shouldShowError = Boolean(run.error_message) && run.status !== "completed" && !isWaitingForDjenWindow;
+  const isWaitingForAvailability = isWorking && run.rate_limit_remaining === 0;
+  const shouldShowError = Boolean(run.error_message) && run.status !== "completed" && !isWaitingForAvailability;
   return (
     <div className="rounded-md border border-line bg-white p-3 text-sm">
       <div className="h-stack items-center gap-2">
@@ -1102,8 +1267,8 @@ function RunStatus({ run }: { run: SearchRun | null }) {
         <span>Importadas: {run.total_imported}</span>
         <span>Data: {formatDate(run.current_date)}</span>
       </div>
-      {isWaitingForDjenWindow && (
-        <p className="mt-2 text-warning">Aguardando nova janela do DJEN para continuar automaticamente.</p>
+      {isWaitingForAvailability && (
+        <p className="mt-2 text-warning">Aguardando disponibilidade da consulta para continuar automaticamente.</p>
       )}
       {shouldShowError && (
         <p className="mt-2 text-danger">{run.error_message}</p>
@@ -1141,7 +1306,7 @@ function ProcessSummary({ detail }: { detail: ProcessDetail }) {
   );
 }
 
-function DataJudSummary({
+function ProcessInformationPanel({
   detail,
   enrichmentStartDate,
   enrichmentEndDate,
@@ -1162,20 +1327,19 @@ function DataJudSummary({
   onEnrichmentEndDateChange: (value: string) => void;
   onEnrich: () => void;
 }) {
-  const datajud = detail.datajud;
+  const complementary = detail.datajud;
   return (
     <div className="v-stack gap-3 border-b border-line pb-4">
       <div className="v-stack gap-3 xl:h-stack xl:items-end">
         <div className="v-stack min-w-0 grow gap-2">
           <div className="h-stack flex-wrap items-center gap-2">
-            <h3 className="text-sm font-semibold">DataJud</h3>
-            <DataJudStatusBadge status={datajud.status} />
-            {datajud.alias && <Badge>{datajud.alias}</Badge>}
-            <span className="text-xs text-neutral-600">Sync: {formatDateTime(datajud.synced_at)}</span>
+            <h3 className="text-sm font-semibold">Informacoes do processo</h3>
+            <ProcessDataStatusBadge status={complementary.status} />
+            <span className="text-xs text-neutral-600">Atualizado: {formatDateTime(complementary.synced_at)}</span>
           </div>
           {lastEnrichment && (
             <div className="h-stack flex-wrap gap-2 text-xs text-neutral-700">
-              <Badge>DJEN {lastEnrichment.djen_items_found}</Badge>
+              <Badge>Encontradas {lastEnrichment.djen_items_found}</Badge>
               <Badge>Novas {lastEnrichment.djen_imported}</Badge>
               <Badge>Paginas {lastEnrichment.djen_pages}</Badge>
               <span>
@@ -1186,7 +1350,7 @@ function DataJudSummary({
         </div>
         <div className="h-stack flex-wrap items-end gap-2">
           <label className="v-stack gap-1 text-xs font-medium text-neutral-600">
-            Inicio DJEN
+            Inicio
             <input
               className="ui-input w-36"
               type="date"
@@ -1195,7 +1359,7 @@ function DataJudSummary({
             />
           </label>
           <label className="v-stack gap-1 text-xs font-medium text-neutral-600">
-            Fim DJEN
+            Fim
             <input
               className="ui-input w-36"
               type="date"
@@ -1214,34 +1378,36 @@ function DataJudSummary({
             ) : (
               <RefreshCw size={17} aria-hidden="true" />
             )}
-            Enriquecer
+            Atualizar dados
           </button>
         </div>
       </div>
       <MutationError error={enrichError} />
       <div className="grid gap-3 md:grid-cols-4">
-        <Metric label="Ajuizamento" value={formatDate(datajud.filed_at)} />
-        <Metric label="Ultima Mov." value={formatDateTime(datajud.last_movement_at)} />
-        <Metric label="Grau" value={datajud.degree ?? "Ausente"} />
-        <Metric label="Sigilo" value={datajud.secrecy_level ?? "Ausente"} />
-        <Metric label="Sistema" value={datajud.system ?? "Ausente"} />
-        <Metric label="Formato" value={datajud.format ?? "Ausente"} />
-        <Metric label="Atualizacao" value={formatDateTime(datajud.source_updated_at)} />
-        <Metric label="Movs. DataJud" value={datajud.movements_count} />
+        <Metric label="Classe" value={detail.process_class ?? "Ausente"} />
+        <Metric label="Orgao" value={detail.agency ?? "Ausente"} />
+        <Metric label="Ajuizamento" value={formatDate(complementary.filed_at)} />
+        <Metric label="Ultima Mov." value={formatDateTime(complementary.last_movement_at)} />
+        <Metric label="Grau" value={complementary.degree ?? "Ausente"} />
+        <Metric label="Sigilo" value={complementary.secrecy_level ?? "Ausente"} />
+        <Metric label="Sistema" value={complementary.system ?? "Ausente"} />
+        <Metric label="Formato" value={complementary.format ?? "Ausente"} />
+        <Metric label="Atualizacao" value={formatDateTime(complementary.source_updated_at)} />
+        <Metric label="Movs. complementares" value={complementary.movements_count} />
       </div>
-      {datajud.subjects.length > 0 && (
+      {complementary.subjects.length > 0 && (
         <div className="h-stack flex-wrap gap-2">
-          {datajud.subjects.map((subject) => (
+          {complementary.subjects.map((subject) => (
             <Badge key={subject}>{subject}</Badge>
           ))}
         </div>
       )}
-      {datajud.error && <p className="text-sm text-danger">{datajud.error}</p>}
+      {complementary.error && <p className="text-sm text-danger">{complementary.error}</p>}
     </div>
   );
 }
 
-function DataJudMovements({ detail }: { detail: ProcessDetail }) {
+function ComplementaryMovements({ detail }: { detail: ProcessDetail }) {
   const movements = detail.datajud.movements;
   if (movements.length === 0) {
     return null;
@@ -1249,7 +1415,7 @@ function DataJudMovements({ detail }: { detail: ProcessDetail }) {
   return (
     <div className="v-stack gap-3 border-b border-line pb-4">
       <div className="h-stack flex-wrap items-center gap-2">
-        <h3 className="text-sm font-semibold">Movimentos DataJud</h3>
+        <h3 className="text-sm font-semibold">Historico complementar</h3>
         <Badge>{movements.length}</Badge>
       </div>
       <div className="v-stack max-h-80 gap-2 overflow-y-auto pr-1">
@@ -1356,7 +1522,7 @@ function ProcessParties({ parties, compact = false }: { parties: ProcessParty[];
         <div key={`${party.name}-${party.polo}-${party.source}`} className="h-stack min-w-0 flex-wrap items-center gap-1">
           <Badge>{poloLabel(party.polo)}</Badge>
           <span className="min-w-0 break-words text-xs text-neutral-700">{party.name}</span>
-          {!compact && <span className="text-[11px] font-medium uppercase text-neutral-500">{party.source}</span>}
+          {!compact && <span className="text-[11px] font-medium uppercase text-neutral-500">{partySourceLabel(party.source)}</span>}
         </div>
       ))}
       {parties.length > visibleParties.length && (
@@ -1458,11 +1624,133 @@ function RiskReprocessSummary({ result }: { result: RiskReprocess }) {
   );
 }
 
+function WorkerQueueSummary({ dashboard }: { dashboard: WorkerDashboard }) {
+  return (
+    <div className="v-stack gap-3 border-t border-line pt-4">
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Metric label="Ativos" value={dashboard.active_workers} />
+        <Metric label="Fila" value={dashboard.queued_runs} />
+        <Metric label="Em execucao" value={dashboard.running_runs} />
+        <Metric label="Falhas" value={dashboard.failed_runs} />
+      </div>
+    </div>
+  );
+}
+
+function WorkerCard({
+  worker,
+  isStopping,
+  onStop,
+}: {
+  worker: WorkerInstance;
+  isStopping: boolean;
+  onStop: () => void;
+}) {
+  const canStop = !["stopped", "failed"].includes(worker.effective_status) && !worker.stop_requested;
+  return (
+    <article className="ui-list-item v-stack gap-3">
+      <div className="h-stack flex-wrap items-start gap-3">
+        <div className="center h-10 w-10 shrink-0 rounded-md bg-brand-50 text-brand-700">
+          <Cpu size={18} aria-hidden="true" />
+        </div>
+        <div className="min-w-0 grow">
+          <div className="h-stack flex-wrap items-center gap-2">
+            <h3 className="break-words text-base font-semibold">{worker.name}</h3>
+            <WorkerStatusBadge status={worker.effective_status} />
+            {worker.stop_requested && <Badge>Parada solicitada</Badge>}
+          </div>
+          <div className="mt-1 h-stack flex-wrap gap-2 text-xs text-neutral-600">
+            <span>{worker.kind}</span>
+            {worker.hostname && <span>{worker.hostname}</span>}
+            {worker.process_id && <span>PID {worker.process_id}</span>}
+          </div>
+        </div>
+        {canStop && (
+          <button
+            className="ui-icon-button text-danger hover:text-danger"
+            type="button"
+            title="Parar robo"
+            disabled={isStopping}
+            onClick={onStop}
+          >
+            <Square size={15} aria-hidden="true" />
+          </button>
+        )}
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-3">
+        <Metric label="Buscas" value={worker.processed_runs} />
+        <Metric label="Sinal" value={lastSeenLabel(worker.last_seen_seconds)} />
+        <Metric label="Inicio" value={formatDateTime(worker.started_at)} />
+      </div>
+
+      {worker.current_run ? (
+        <WorkerRunPanel worker={worker} />
+      ) : (
+        <div className="rounded-md border border-line bg-neutral-50 p-3 text-sm text-neutral-700">
+          {worker.effective_status === "idle" ? "Aguardando fila" : workerStatusLabel(worker.effective_status)}
+        </div>
+      )}
+
+      {worker.last_error && <p className="text-sm text-danger">{worker.last_error}</p>}
+    </article>
+  );
+}
+
+function WorkerRunPanel({ worker }: { worker: WorkerInstance }) {
+  if (!worker.current_run) {
+    return null;
+  }
+  const run = worker.current_run;
+  const progress = workerRunProgress(run.current_date, run.start_date, run.end_date);
+  return (
+    <div className="v-stack gap-3 rounded-md border border-brand-100 bg-brand-50 p-3">
+      <div className="h-stack flex-wrap items-center gap-2">
+        <span className="font-semibold">{run.client_name}</span>
+        <Badge>{statusLabel(run.status)}</Badge>
+        <span className="text-xs text-neutral-600">
+          {formatDate(run.start_date)} - {formatDate(run.end_date)}
+        </span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-white">
+        <div className="h-full rounded-full bg-brand-600 transition-all" style={{ width: `${progress}%` }} />
+      </div>
+      <div className="grid gap-2 sm:grid-cols-4">
+        <Metric label="Data" value={formatDate(run.current_date)} />
+        <Metric label="Pagina" value={run.current_page} />
+        <Metric label="Importadas" value={run.total_imported} />
+        <Metric label="Rate limit" value={rateLimitLabel(run.rate_limit_remaining, run.rate_limit_limit)} />
+      </div>
+      {run.error_message && <p className="text-sm text-warning">{run.error_message}</p>}
+    </div>
+  );
+}
+
+function WorkerStatusBadge({ status, label }: { status: string; label?: string }) {
+  const style =
+    status === "working"
+      ? "border-blue-200 bg-brand-50 text-brand-700"
+      : status === "idle"
+        ? "border-emerald-200 bg-emerald-50 text-success"
+        : status === "stale"
+          ? "border-amber-200 bg-amber-50 text-warning"
+          : status === "failed"
+            ? "border-red-200 bg-red-50 text-danger"
+            : status === "stopped"
+              ? "border-neutral-200 bg-neutral-50 text-neutral-600"
+              : "border-neutral-200 bg-white text-neutral-700";
+  return (
+    <span className={cn("rounded-md border px-2 py-1 text-xs font-semibold", style)}>
+      {label ?? workerStatusLabel(status)}
+    </span>
+  );
+}
+
 function Badge({ children }: { children: ReactNode }) {
   return <span className="rounded-md border border-line bg-white px-2 py-1 text-xs font-medium">{children}</span>;
 }
 
-function DataJudStatusBadge({ status }: { status: string }) {
+function ProcessDataStatusBadge({ status }: { status: string }) {
   const style =
     status === "synced"
       ? "border-emerald-200 bg-emerald-50 text-success"
@@ -1473,7 +1761,7 @@ function DataJudStatusBadge({ status }: { status: string }) {
           : "border-neutral-200 bg-neutral-50 text-neutral-600";
   return (
     <span className={cn("rounded-md border px-2 py-1 text-xs font-semibold", style)}>
-      {datajudLabel(status)}
+      {processDataStatusLabel(status)}
     </span>
   );
 }
@@ -1556,6 +1844,14 @@ function defaultRiskForm(): RiskKeywordPayload {
   };
 }
 
+function defaultWorkerForm(): WorkerStartPayload {
+  return {
+    name: "",
+    max_jobs: null,
+    poll_interval_seconds: 5,
+  };
+}
+
 function normalizeRiskPayload(payload: RiskKeywordPayload): RiskKeywordPayload {
   return {
     term: payload.term.trim(),
@@ -1564,6 +1860,24 @@ function normalizeRiskPayload(payload: RiskKeywordPayload): RiskKeywordPayload {
     description: payload.description?.trim() || null,
     active: payload.active,
   };
+}
+
+function normalizeWorkerPayload(payload: WorkerStartPayload): WorkerStartPayload {
+  return {
+    name: payload.name?.trim() || null,
+    max_jobs: payload.max_jobs ?? null,
+    poll_interval_seconds: payload.poll_interval_seconds,
+  };
+}
+
+function workerRunProgress(currentDate: string | null, startDate: string, endDate: string): number {
+  const start = Date.parse(startDate);
+  const end = Date.parse(endDate);
+  const current = Date.parse(currentDate ?? startDate);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return currentDate ? 100 : 0;
+  }
+  return Math.max(0, Math.min(100, Math.round(((current - start) / (end - start)) * 100)));
 }
 
 function uniqueOptions(values: Array<string | null | undefined> | undefined): string[] {
@@ -1580,17 +1894,27 @@ function poloLabel(polo: string | null | undefined): string {
   return "Parte";
 }
 
-function datajudLabel(status: string): string {
+function processDataStatusLabel(status: string): string {
   if (status === "synced") {
-    return "DataJud ok";
+    return "Completo";
   }
   if (status === "not_found") {
     return "Nao encontrado";
   }
   if (status === "error") {
-    return "Erro DataJud";
+    return "Erro no detalhamento";
   }
   return "Pendente";
+}
+
+function partySourceLabel(source: string): string {
+  if (source === "datajud") {
+    return "Complementar";
+  }
+  if (source === "djen") {
+    return "Cadastro";
+  }
+  return source;
 }
 
 function riskLevelLabel(level: RiskLevel): string {
@@ -1633,6 +1957,48 @@ function statusLabel(status: string): string {
     return "Falhou";
   }
   return status;
+}
+
+function workerStatusLabel(status: string): string {
+  if (status === "starting") {
+    return "Iniciando";
+  }
+  if (status === "idle") {
+    return "Aguardando";
+  }
+  if (status === "working") {
+    return "Trabalhando";
+  }
+  if (status === "stopped") {
+    return "Parado";
+  }
+  if (status === "failed") {
+    return "Falhou";
+  }
+  if (status === "stale") {
+    return "Sem sinal";
+  }
+  return status;
+}
+
+function lastSeenLabel(value: number | null): string {
+  if (value === null) {
+    return "Ausente";
+  }
+  if (value < 60) {
+    return `${value}s`;
+  }
+  return `${Math.floor(value / 60)}min`;
+}
+
+function rateLimitLabel(remaining: number | null, limit: number | null): string {
+  if (remaining === null && limit === null) {
+    return "Ausente";
+  }
+  if (limit === null) {
+    return String(remaining ?? "");
+  }
+  return `${remaining ?? "-"} / ${limit}`;
 }
 
 function formatDate(value: string | null | undefined): string {

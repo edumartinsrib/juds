@@ -1,11 +1,13 @@
+from datetime import datetime, timezone
+
 import httpx
 from sqlalchemy import select
 
-from app.api import get_datajud_client, get_djen_client
+from app.api import get_datajud_client, get_djen_client, get_worker_starter
 from app.datajud import DataJudSearchResult
 from app.importer import DjenImporter
 from app.main import create_app
-from app.models import Client, Communication
+from app.models import Client, Communication, SearchRun, WorkerInstance
 
 from app.djen import DjenPage
 from tests.test_datajud import datajud_source
@@ -127,7 +129,7 @@ async def test_client_search_run_and_export_flow(session) -> None:
             "/api/exports", params={"client_id": created["id"], "format": "csv"}
         )
         assert csv_response.status_code == 200
-        assert "datajud_status" in csv_response.text
+        assert "detalhamento_status" in csv_response.text
         assert "Intimacao com prazo" in csv_response.text
 
         xlsx_response = await client.get(
@@ -200,3 +202,62 @@ async def test_risk_keyword_crud_reprocesses_existing_communications(session) ->
         ).json()
         assert processes_after_delete[0]["risk_matches_count"] == 0
         assert processes_after_delete[0]["highest_risk_level"] is None
+
+
+async def test_worker_dashboard_start_and_stop_endpoints(session) -> None:
+    db_client = Client(name="Joao da Silva", normalized_name="JOAO DA SILVA", cpf=None)
+    session.add(db_client)
+    await session.flush()
+    run = SearchRun(
+        client_id=db_client.id,
+        status="running",
+        start_date=datetime(2026, 6, 25, tzinfo=timezone.utc).date(),
+        end_date=datetime(2026, 6, 26, tzinfo=timezone.utc).date(),
+        current_date=datetime(2026, 6, 25, tzinfo=timezone.utc).date(),
+        current_page=2,
+        total_imported=4,
+    )
+    worker = WorkerInstance(
+        name="worker-teste",
+        kind="api",
+        status="working",
+        hostname="host-teste",
+        process_id=123,
+        heartbeat_at=datetime.now(timezone.utc),
+        started_at=datetime.now(timezone.utc),
+        current_run=run,
+        poll_interval_seconds=5,
+    )
+    session.add_all([run, worker])
+    await session.commit()
+
+    started_workers: list[tuple[str, dict]] = []
+
+    def fake_starter(worker_id: str, **kwargs) -> None:
+        started_workers.append((worker_id, kwargs))
+
+    async with api_client({get_worker_starter: lambda: fake_starter}) as client:
+        dashboard_response = await client.get("/api/workers")
+        assert dashboard_response.status_code == 200
+        dashboard = dashboard_response.json()
+        assert dashboard["working_workers"] == 1
+        assert dashboard["running_runs"] == 1
+        assert dashboard["workers"][0]["current_run"]["client_name"] == "Joao da Silva"
+        assert dashboard["workers"][0]["current_run"]["current_page"] == 2
+
+        start_response = await client.post(
+            "/api/workers",
+            json={"name": "worker-manual", "max_jobs": 1, "poll_interval_seconds": 3},
+        )
+        assert start_response.status_code == 201
+        started = start_response.json()
+        assert started["name"] == "worker-manual"
+        assert started_workers == [
+            (started["id"], {"max_jobs": 1, "poll_interval_seconds": 3})
+        ]
+
+        stop_response = await client.post(f"/api/workers/{started['id']}/stop")
+        assert stop_response.status_code == 200
+        stopped = stop_response.json()
+        assert stopped["stop_requested"] is True
+        assert stopped["effective_status"] == "stopped"

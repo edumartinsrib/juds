@@ -2,9 +2,10 @@ from datetime import date
 
 from sqlalchemy import func, select
 
+from app import db
 from app.datajud import DATAJUD_STATUS_ERROR, DATAJUD_STATUS_SYNCED, DataJudSearchResult
 from app.djen import DjenPage, DjenRateLimitError
-from app.importer import DjenImporter
+from app.importer import DjenImporter, process_next_queued_run
 from app.models import (
     Client,
     ClientProcess,
@@ -16,6 +17,7 @@ from app.models import (
     Process,
     RiskKeyword,
     SearchRun,
+    WorkerInstance,
 )
 from app.utils import (
     CPF_STATUS_ABSENT,
@@ -220,6 +222,58 @@ async def test_importer_waits_before_next_request_when_rate_limit_remaining_is_z
     assert [call["start_date"] for call in fake.calls] == [date(2026, 6, 18), date(2026, 6, 19)]
 
 
+async def test_process_next_queued_run_tracks_worker_status(session) -> None:
+    client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    session.add(client)
+    await session.flush()
+    run = SearchRun(
+        client_id=client.id,
+        status="queued",
+        start_date=date(2026, 6, 25),
+        end_date=date(2026, 6, 25),
+        current_page=1,
+    )
+    worker = WorkerInstance(
+        name="worker-teste",
+        kind="api",
+        status="starting",
+        poll_interval_seconds=1,
+    )
+    session.add_all([run, worker])
+    await session.commit()
+
+    fake = FakeDjenClient(
+        [
+            DjenPage(
+                items=[djen_item(1200)],
+                count=1,
+                rate_limit_limit=100,
+                rate_limit_remaining=99,
+            )
+        ]
+    )
+
+    processed = await process_next_queued_run(
+        db.AsyncSessionLocal,
+        djen_client=fake,
+        sleep=noop_sleep,
+        worker_id=worker.id,
+    )
+
+    await session.refresh(run)
+    await session.refresh(worker)
+    assert processed is True
+    assert run.status == "completed"
+    assert worker.status == "idle"
+    assert worker.current_run_id is None
+    assert worker.processed_runs == 1
+    assert worker.heartbeat_at is not None
+
+
 async def test_importer_paginates_by_day(session) -> None:
     client = Client(name="Joao", normalized_name=normalize_name("Joao"), cpf=None)
     session.add(client)
@@ -369,7 +423,7 @@ async def test_importer_records_datajud_error_without_failing_djen_import(sessio
     session.add(client)
     await session.flush()
 
-    fake_datajud = FakeDataJudClient([RuntimeError("DataJud indisponivel")])
+    fake_datajud = FakeDataJudClient([RuntimeError("Fonte complementar indisponivel")])
     importer = DjenImporter(
         session,
         FakeDjenClient([]),
@@ -385,7 +439,7 @@ async def test_importer_records_datajud_error_without_failing_djen_import(sessio
     assert imported == 1
     assert await session.scalar(select(func.count(Communication.id))) == 1
     assert process.datajud_status == DATAJUD_STATUS_ERROR
-    assert process.datajud_error == "DataJud indisponivel"
+    assert process.datajud_error == "Fonte complementar indisponivel"
 
 
 async def test_importer_enriches_process_by_number_with_larger_window(session) -> None:

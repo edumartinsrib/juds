@@ -24,6 +24,62 @@ export type SearchRun = {
   finished_at: string | null;
 };
 
+export type WorkerStartPayload = {
+  name?: string | null;
+  max_jobs?: number | null;
+  poll_interval_seconds: number;
+};
+
+export type WorkerRun = {
+  id: string;
+  client_id: string;
+  client_name: string;
+  status: string;
+  start_date: string;
+  end_date: string;
+  current_date: string | null;
+  current_page: number;
+  total_imported: number;
+  rate_limit_limit: number | null;
+  rate_limit_remaining: number | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type WorkerInstance = {
+  id: string;
+  name: string;
+  kind: string;
+  status: string;
+  effective_status: string;
+  hostname: string | null;
+  process_id: number | null;
+  started_at: string | null;
+  heartbeat_at: string | null;
+  stopped_at: string | null;
+  last_seen_seconds: number | null;
+  stop_requested: boolean;
+  processed_runs: number;
+  poll_interval_seconds: number;
+  last_error: string | null;
+  current_run: WorkerRun | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkerDashboard = {
+  workers: WorkerInstance[];
+  active_workers: number;
+  working_workers: number;
+  idle_workers: number;
+  stale_workers: number;
+  queued_runs: number;
+  running_runs: number;
+  failed_runs: number;
+};
+
 export type ProcessListItem = {
   id: string;
   numero_processo: string;

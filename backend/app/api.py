@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from typing import Any
 
@@ -28,6 +29,7 @@ from app.models import (
     CommunicationRiskMatch,
     RiskKeyword,
     SearchRun,
+    WorkerInstance,
 )
 from app.risk import (
     RISK_LEVEL_ORDER,
@@ -57,9 +59,22 @@ from app.schemas import (
     RiskReprocessRead,
     SearchRunCreate,
     SearchRunRead,
+    WorkerDashboardRead,
+    WorkerRead,
+    WorkerRunRead,
+    WorkerStartCreate,
     cpf_to_masked,
 )
 from app.utils import get_first, mask_cpf, normalize_name
+from app.worker_control import (
+    WORKER_HEARTBEAT_STALE_SECONDS,
+    WORKER_STATUS_FAILED,
+    WORKER_STATUS_IDLE,
+    WORKER_STATUS_STOPPED,
+    WORKER_STATUS_WORKING,
+    create_worker_instance,
+    start_api_worker,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -80,9 +95,77 @@ def get_datajud_client() -> DataJudClient | None:
     )
 
 
+def get_worker_starter() -> Callable[..., None]:
+    return start_api_worker
+
+
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/workers", response_model=WorkerDashboardRead)
+async def list_workers(session: AsyncSession = Depends(get_session)) -> WorkerDashboardRead:
+    result = await session.execute(
+        select(WorkerInstance)
+        .options(selectinload(WorkerInstance.current_run).selectinload(SearchRun.client))
+        .order_by(WorkerInstance.created_at.desc(), WorkerInstance.name.asc())
+    )
+    workers = [_worker_read(worker) for worker in result.scalars().all()]
+    queued_runs = await _count_runs_by_status(session, "queued")
+    running_runs = await _count_runs_by_status(session, "running")
+    failed_runs = await _count_runs_by_status(session, "failed")
+    return WorkerDashboardRead(
+        workers=workers,
+        active_workers=sum(
+            1
+            for worker in workers
+            if worker.effective_status not in {WORKER_STATUS_STOPPED, WORKER_STATUS_FAILED, "stale"}
+        ),
+        working_workers=sum(1 for worker in workers if worker.effective_status == WORKER_STATUS_WORKING),
+        idle_workers=sum(1 for worker in workers if worker.effective_status == WORKER_STATUS_IDLE),
+        stale_workers=sum(1 for worker in workers if worker.effective_status == "stale"),
+        queued_runs=queued_runs,
+        running_runs=running_runs,
+        failed_runs=failed_runs,
+    )
+
+
+@router.post("/workers", response_model=WorkerRead, status_code=201)
+async def start_worker(
+    payload: WorkerStartCreate,
+    session: AsyncSession = Depends(get_session),
+    worker_starter: Callable[..., None] = Depends(get_worker_starter),
+) -> WorkerRead:
+    worker = await create_worker_instance(
+        session,
+        name=payload.name,
+        kind="api",
+        poll_interval_seconds=payload.poll_interval_seconds,
+    )
+    worker_starter(
+        worker.id,
+        max_jobs=payload.max_jobs,
+        poll_interval_seconds=payload.poll_interval_seconds,
+    )
+    return _worker_read(worker)
+
+
+@router.post("/workers/{worker_id}/stop", response_model=WorkerRead)
+async def stop_worker(worker_id: str, session: AsyncSession = Depends(get_session)) -> WorkerRead:
+    worker = await _get_worker_for_read(session, worker_id)
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker nao encontrado")
+    worker.stop_requested = True
+    if worker.status in {WORKER_STATUS_IDLE, "starting"}:
+        worker.status = WORKER_STATUS_STOPPED
+        worker.stopped_at = datetime.now(timezone.utc)
+        worker.current_run_id = None
+    await session.commit()
+    refreshed = await _get_worker_for_read(session, worker_id)
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="Worker nao encontrado")
+    return _worker_read(refreshed)
 
 
 @router.get("/risk-keywords", response_model=list[RiskKeywordRead])
@@ -281,7 +364,7 @@ async def enrich_process(
     except DjenRateLimitError as exc:
         raise HTTPException(
             status_code=429,
-            detail="Rate limit do DJEN; tente novamente em alguns instantes",
+            detail="Rate limit da fonte de movimentacoes; tente novamente em alguns instantes",
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -435,6 +518,81 @@ def _search_run_read(run: SearchRun) -> SearchRunRead:
         started_at=run.started_at,
         finished_at=run.finished_at,
     )
+
+
+async def _count_runs_by_status(session: AsyncSession, status: str) -> int:
+    count = await session.scalar(select(func.count(SearchRun.id)).where(SearchRun.status == status))
+    return int(count or 0)
+
+
+async def _get_worker_for_read(session: AsyncSession, worker_id: str) -> WorkerInstance | None:
+    result = await session.execute(
+        select(WorkerInstance)
+        .where(WorkerInstance.id == worker_id)
+        .options(selectinload(WorkerInstance.current_run).selectinload(SearchRun.client))
+    )
+    return result.scalar_one_or_none()
+
+
+def _worker_read(worker: WorkerInstance) -> WorkerRead:
+    last_seen_seconds = _worker_last_seen_seconds(worker)
+    return WorkerRead(
+        id=worker.id,
+        name=worker.name,
+        kind=worker.kind,
+        status=worker.status,
+        effective_status=_worker_effective_status(worker, last_seen_seconds),
+        hostname=worker.hostname,
+        process_id=worker.process_id,
+        started_at=worker.started_at,
+        heartbeat_at=worker.heartbeat_at,
+        stopped_at=worker.stopped_at,
+        last_seen_seconds=last_seen_seconds,
+        stop_requested=worker.stop_requested,
+        processed_runs=worker.processed_runs,
+        poll_interval_seconds=worker.poll_interval_seconds,
+        last_error=worker.last_error,
+        current_run=_worker_run_read(worker.current_run) if worker.current_run else None,
+        created_at=worker.created_at,
+        updated_at=worker.updated_at,
+    )
+
+
+def _worker_run_read(run: SearchRun) -> WorkerRunRead:
+    return WorkerRunRead(
+        id=run.id,
+        client_id=run.client_id,
+        client_name=run.client.name if run.client else "Cliente nao encontrado",
+        status=run.status,
+        start_date=run.start_date,
+        end_date=run.end_date,
+        current_date=run.current_date,
+        current_page=run.current_page,
+        total_imported=run.total_imported,
+        rate_limit_limit=run.rate_limit_limit,
+        rate_limit_remaining=run.rate_limit_remaining,
+        error_message=run.error_message,
+        created_at=run.created_at,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+    )
+
+
+def _worker_last_seen_seconds(worker: WorkerInstance) -> int | None:
+    if not worker.heartbeat_at:
+        return None
+    heartbeat = worker.heartbeat_at
+    if heartbeat.tzinfo is None:
+        heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - heartbeat).total_seconds()))
+
+
+def _worker_effective_status(worker: WorkerInstance, last_seen_seconds: int | None) -> str:
+    if worker.status in {WORKER_STATUS_STOPPED, WORKER_STATUS_FAILED}:
+        return worker.status
+    if last_seen_seconds is not None and last_seen_seconds > WORKER_HEARTBEAT_STALE_SECONDS:
+        return "stale"
+    return worker.status
 
 
 def _process_item(process: Process, client_process: ClientProcess | None) -> ProcessListItem:
@@ -763,23 +921,23 @@ async def _export_rows(session: AsyncSession, client_id: str) -> list[dict[str, 
                 "classe": process.process_class or "",
                 "orgao": communication.nome_orgao or process.agency or "",
                 "data_disponibilizacao": communication.data_disponibilizacao.isoformat(),
-                "tipo_comunicacao": communication.tipo_comunicacao or "",
+                "tipo_movimentacao": communication.tipo_comunicacao or "",
                 "cpf_status": client_process.cpf_status,
                 "polo": client_process.polo or "",
-                "datajud_status": process.datajud_status or "pending",
-                "datajud_ajuizamento": _datetime_to_text(process.datajud_filed_at),
-                "datajud_ultima_atualizacao": _datetime_to_text(
+                "detalhamento_status": process.datajud_status or "pending",
+                "ajuizamento": _datetime_to_text(process.datajud_filed_at),
+                "ultima_atualizacao": _datetime_to_text(
                     process.datajud_source_updated_at
                 ),
-                "datajud_ultima_movimentacao": _datetime_to_text(
+                "ultima_movimentacao": _datetime_to_text(
                     process.datajud_last_movement_at
                 ),
-                "datajud_grau": process.datajud_degree or "",
-                "datajud_sistema": process.datajud_system or "",
-                "datajud_formato": process.datajud_format or "",
-                "datajud_sigilo": _optional_int_to_text(process.datajud_secrecy_level),
-                "datajud_assuntos": "; ".join(datajud_subject_names(process.datajud_payload)),
-                "datajud_movimentos_count": str(process.datajud_movements_count or 0),
+                "grau": process.datajud_degree or "",
+                "sistema": process.datajud_system or "",
+                "formato": process.datajud_format or "",
+                "sigilo": _optional_int_to_text(process.datajud_secrecy_level),
+                "assuntos": "; ".join(datajud_subject_names(process.datajud_payload)),
+                "movimentos_count": str(process.datajud_movements_count or 0),
                 "risco_nivel": _highest_risk_level(risk_matches) or "",
                 "risco_palavras": "; ".join(
                     f"{match.keyword} ({match.risk_level})" for match in risk_matches
@@ -800,19 +958,19 @@ def _export_csv(rows: list[dict[str, str]]) -> str:
         "classe",
         "orgao",
         "data_disponibilizacao",
-        "tipo_comunicacao",
+        "tipo_movimentacao",
         "cpf_status",
         "polo",
-        "datajud_status",
-        "datajud_ajuizamento",
-        "datajud_ultima_atualizacao",
-        "datajud_ultima_movimentacao",
-        "datajud_grau",
-        "datajud_sistema",
-        "datajud_formato",
-        "datajud_sigilo",
-        "datajud_assuntos",
-        "datajud_movimentos_count",
+        "detalhamento_status",
+        "ajuizamento",
+        "ultima_atualizacao",
+        "ultima_movimentacao",
+        "grau",
+        "sistema",
+        "formato",
+        "sigilo",
+        "assuntos",
+        "movimentos_count",
         "risco_nivel",
         "risco_palavras",
         "risco_evidencias",
@@ -835,19 +993,19 @@ def _export_xlsx(rows: list[dict[str, str]]) -> bytes:
         "classe",
         "orgao",
         "data_disponibilizacao",
-        "tipo_comunicacao",
+        "tipo_movimentacao",
         "cpf_status",
         "polo",
-        "datajud_status",
-        "datajud_ajuizamento",
-        "datajud_ultima_atualizacao",
-        "datajud_ultima_movimentacao",
-        "datajud_grau",
-        "datajud_sistema",
-        "datajud_formato",
-        "datajud_sigilo",
-        "datajud_assuntos",
-        "datajud_movimentos_count",
+        "detalhamento_status",
+        "ajuizamento",
+        "ultima_atualizacao",
+        "ultima_movimentacao",
+        "grau",
+        "sistema",
+        "formato",
+        "sigilo",
+        "assuntos",
+        "movimentos_count",
         "risco_nivel",
         "risco_palavras",
         "risco_evidencias",

@@ -151,7 +151,7 @@ class DataJudClient:
         process_number = normalize_process_number(numero_processo)
         aliases = candidate_datajud_aliases(tribunal, process_number)
         if not aliases:
-            raise DataJudError("Nao foi possivel resolver o endpoint DataJud do processo")
+            raise DataJudError("Nao foi possivel resolver a fonte complementar do processo")
 
         first_alias = aliases[0]
         for alias in aliases:
@@ -185,11 +185,11 @@ class DataJudClient:
             )
 
         if response.status_code in (401, 403):
-            raise DataJudError(f"Falha de autorizacao no DataJud ({response.status_code})")
+            raise DataJudError(f"Falha de autorizacao na fonte complementar ({response.status_code})")
         if response.status_code == 429:
-            raise DataJudError("Rate limit do DataJud")
+            raise DataJudError("Rate limit da fonte complementar")
         if response.status_code >= 400:
-            raise DataJudError(f"DataJud retornou HTTP {response.status_code}")
+            raise DataJudError(f"Fonte complementar retornou HTTP {response.status_code}")
 
         payload = response.json()
         hits_container = payload.get("hits") or {}

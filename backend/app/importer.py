@@ -32,6 +32,7 @@ from app.models import (
     Lawyer,
     Process,
     SearchRun,
+    WorkerInstance,
 )
 from app.risk import classify_communication_risk
 from app.utils import (
@@ -53,8 +54,8 @@ from app.utils import (
 SleepFunc = Callable[[float], Awaitable[None]]
 logger = logging.getLogger("juds.importer")
 
-DJEN_RATE_LIMIT_MESSAGE = "Rate limit do DJEN; retomando apos pausa."
-DJEN_RATE_LIMIT_WAIT_MESSAGE = "DJEN sem saldo de requisicoes; aguardando nova janela."
+DJEN_RATE_LIMIT_MESSAGE = "Rate limit da fonte de movimentacoes; retomando apos pausa."
+DJEN_RATE_LIMIT_WAIT_MESSAGE = "Fonte de movimentacoes sem saldo de requisicoes; aguardando nova janela."
 
 
 @dataclass(frozen=True)
@@ -150,7 +151,7 @@ class DjenImporter:
         cursor = run.current_date or run.start_date
         page = run.current_page or 1
         logger.info(
-            "Iniciando busca DJEN run_id=%s client_id=%s nome=%r periodo=%s..%s data_atual=%s pagina=%s",
+            "Iniciando busca de movimentacoes run_id=%s client_id=%s nome=%r periodo=%s..%s data_atual=%s pagina=%s",
             run.id,
             client.id,
             client.name,
@@ -179,7 +180,7 @@ class DjenImporter:
                         run.error_message = DJEN_RATE_LIMIT_MESSAGE
                         await self.session.commit()
                         logger.warning(
-                            "DJEN respondeu 429 run_id=%s client_id=%s nome=%r data=%s pagina=%s "
+                            "Fonte de movimentacoes respondeu 429 run_id=%s client_id=%s nome=%r data=%s pagina=%s "
                             "limite=%s restante=%s aguardando=%ss",
                             run.id,
                             client.id,
@@ -195,7 +196,7 @@ class DjenImporter:
 
                     self._record_rate_limit(run, djen_page)
                     logger.info(
-                        "Pagina DJEN processada run_id=%s client_id=%s nome=%r data=%s pagina=%s "
+                        "Pagina de movimentacoes processada run_id=%s client_id=%s nome=%r data=%s pagina=%s "
                         "itens=%s total_dia=%s limite=%s restante=%s",
                         run.id,
                         client.id,
@@ -234,7 +235,7 @@ class DjenImporter:
             await self.session.commit()
             await self.session.refresh(run)
             logger.info(
-                "Busca DJEN concluida run_id=%s client_id=%s nome=%r importadas=%s limite=%s restante=%s",
+                "Busca de movimentacoes concluida run_id=%s client_id=%s nome=%r importadas=%s limite=%s restante=%s",
                 run.id,
                 client.id,
                 client.name,
@@ -249,7 +250,7 @@ class DjenImporter:
             run.finished_at = datetime.now(timezone.utc)
             await self.session.commit()
             logger.exception(
-                "Busca DJEN falhou run_id=%s client_id=%s nome=%r data=%s pagina=%s",
+                "Busca de movimentacoes falhou run_id=%s client_id=%s nome=%r data=%s pagina=%s",
                 run.id,
                 client.id,
                 client.name,
@@ -341,7 +342,7 @@ class DjenImporter:
         run.error_message = DJEN_RATE_LIMIT_WAIT_MESSAGE
         await self.session.commit()
         logger.info(
-            "DJEN informou saldo zero; pausa preventiva run_id=%s client_id=%s nome=%r "
+            "Fonte de movimentacoes informou saldo zero; pausa preventiva run_id=%s client_id=%s nome=%r "
             "proxima_data=%s proxima_pagina=%s limite=%s aguardando=%ss",
             run.id,
             client.id,
@@ -390,7 +391,7 @@ class DjenImporter:
     async def _create_communication(self, client: Client, item: dict[str, Any]) -> Communication:
         process_number = self._process_number_from_item(item)
         if not process_number:
-            raise ValueError("Comunicacao do DJEN sem numero de processo")
+            raise ValueError("Movimentacao sem numero de processo")
 
         movement_date = parse_djen_date(
             get_first(item, "data_disponibilizacao", "datadisponibilizacao")
@@ -682,12 +683,14 @@ async def process_next_queued_run(
     djen_client: DjenClient | None = None,
     datajud_client: DataJudClient | None = None,
     sleep: SleepFunc = asyncio.sleep,
+    worker_id: str | None = None,
 ) -> bool:
     async with session_factory() as session:
-        result = await session.execute(_queued_run_query())
-        run = result.scalar_one_or_none()
-        if run is None:
+        run_id = await _claim_next_queued_run(session)
+        if run_id is None:
+            await _mark_worker_idle(session, worker_id)
             return False
+        await _mark_worker_working(session, worker_id, run_id)
         settings = get_settings()
         client = djen_client or DjenClient(settings.djen_base_url)
         datajud = datajud_client
@@ -698,7 +701,8 @@ async def process_next_queued_run(
                 timeout=settings.datajud_timeout_seconds,
             )
         importer = DjenImporter(session, client, datajud_client=datajud, sleep=sleep)
-        await importer.process_run(run.id)
+        await importer.process_run(run_id)
+        await _mark_worker_idle(session, worker_id, processed_run=True)
         return True
 
 
@@ -709,6 +713,56 @@ def _queued_run_query() -> Select[tuple[SearchRun]]:
         .order_by(SearchRun.created_at.asc(), SearchRun.id.asc())
         .limit(1)
     )
+
+
+async def _claim_next_queued_run(session: AsyncSession) -> str | None:
+    statement = _queued_run_query().with_for_update(skip_locked=True)
+    result = await session.execute(statement)
+    run = result.scalar_one_or_none()
+    if run is None:
+        return None
+    run.status = "running"
+    run.started_at = run.started_at or datetime.now(timezone.utc)
+    run.error_message = None
+    await session.commit()
+    return run.id
+
+
+async def _mark_worker_working(
+    session: AsyncSession,
+    worker_id: str | None,
+    run_id: str,
+) -> None:
+    if not worker_id:
+        return
+    worker = await session.get(WorkerInstance, worker_id)
+    if not worker:
+        return
+    worker.status = "working"
+    worker.current_run_id = run_id
+    worker.heartbeat_at = datetime.now(timezone.utc)
+    worker.last_error = None
+    await session.commit()
+
+
+async def _mark_worker_idle(
+    session: AsyncSession,
+    worker_id: str | None,
+    *,
+    processed_run: bool = False,
+) -> None:
+    if not worker_id:
+        return
+    worker = await session.get(WorkerInstance, worker_id)
+    if not worker:
+        return
+    worker.status = "idle"
+    worker.current_run_id = None
+    worker.heartbeat_at = datetime.now(timezone.utc)
+    worker.last_error = None
+    if processed_run:
+        worker.processed_runs += 1
+    await session.commit()
 
 
 def _to_str(value: Any) -> str | None:
@@ -729,4 +783,7 @@ def _to_int(value: Any) -> int | None:
 
 def _sanitize_datajud_error(exc: Exception) -> str:
     message = str(exc).strip() or exc.__class__.__name__
+    message = message.replace("DataJud", "Fonte complementar").replace(
+        "DJEN", "fonte de movimentacoes"
+    )
     return message[:512]

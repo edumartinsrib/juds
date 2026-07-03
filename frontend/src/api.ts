@@ -9,6 +9,9 @@ import type {
   RiskKeywordPayload,
   RiskReprocess,
   SearchRun,
+  WorkerDashboard,
+  WorkerInstance,
+  WorkerStartPayload,
 } from "./types";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
@@ -51,6 +54,23 @@ export function createSearchRun(
 
 export function getSearchRun(runId: string): Promise<SearchRun> {
   return request<SearchRun>(`/api/search-runs/${runId}`);
+}
+
+export function getWorkerDashboard(): Promise<WorkerDashboard> {
+  return request<WorkerDashboard>("/api/workers");
+}
+
+export function startWorker(payload: WorkerStartPayload): Promise<WorkerInstance> {
+  return request<WorkerInstance>("/api/workers", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function stopWorker(workerId: string): Promise<WorkerInstance> {
+  return request<WorkerInstance>(`/api/workers/${workerId}/stop`, {
+    method: "POST",
+  });
 }
 
 export function listProcesses(clientId?: string | null): Promise<ProcessListItem[]> {

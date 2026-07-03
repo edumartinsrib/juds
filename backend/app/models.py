@@ -72,6 +72,32 @@ class SearchRun(TimestampMixin, Base):
     client: Mapped["Client"] = relationship(back_populates="search_runs")
 
 
+class WorkerInstance(TimestampMixin, Base):
+    __tablename__ = "worker_instances"
+    __table_args__ = (
+        Index("ix_worker_instances_status_heartbeat", "status", "heartbeat_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="api", index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="starting", index=True)
+    hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    process_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    current_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("search_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    stop_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    processed_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    poll_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    current_run: Mapped[SearchRun | None] = relationship()
+
+
 class Process(TimestampMixin, Base):
     __tablename__ = "processes"
 
