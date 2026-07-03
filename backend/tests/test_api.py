@@ -88,6 +88,42 @@ async def test_client_search_run_and_export_flow(session) -> None:
         assert process_page["total_pages"] == 1
         assert process_page["items"][0]["id"] == processes[0]["id"]
 
+        filter_options_response = await client.get(
+            "/api/processes/filter-options",
+            params={"client_id": created["id"]},
+        )
+        assert filter_options_response.status_code == 200
+        filter_options = filter_options_response.json()
+        assert filter_options["process_classes"] == ["Procedimento Comum Civel"]
+        assert filter_options["tribunals"] == ["TJSP"]
+        assert filter_options["data_statuses"] == ["pending"]
+        assert filter_options["agencies"] == ["1 Vara Civel"]
+
+        filtered_page_response = await client.get(
+            "/api/processes/page",
+            params={
+                "client_id": created["id"],
+                "process_class": "Procedimento Comum Civel",
+                "tribunal": "TJSP",
+                "data_status": "pending",
+                "agency": "1 Vara Civel",
+                "process_number": "0001234",
+                "party_name": "Joao",
+                "defendant": "Silva",
+                "page": 1,
+                "page_size": 10,
+            },
+        )
+        assert filtered_page_response.status_code == 200
+        assert filtered_page_response.json()["total"] == 1
+
+        no_defendant_response = await client.get(
+            "/api/processes/page",
+            params={"client_id": created["id"], "defendant": "Autor inexistente"},
+        )
+        assert no_defendant_response.status_code == 200
+        assert no_defendant_response.json()["total"] == 0
+
         fake_datajud = FakeDataJudClient(
             [
                 DataJudSearchResult(

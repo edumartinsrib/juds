@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -50,6 +50,7 @@ from app.schemas import (
     ProcessDetail,
     ProcessEnrichmentCreate,
     ProcessEnrichmentRead,
+    ProcessFilterOptionsRead,
     ProcessPageRead,
     ProcessListItem,
     ProcessPartyRead,
@@ -67,7 +68,7 @@ from app.schemas import (
     WorkerStartCreate,
     cpf_to_masked,
 )
-from app.utils import get_first, mask_cpf, normalize_name
+from app.utils import get_first, mask_cpf, normalize_name, normalize_process_number
 from app.worker_control import (
     WORKER_HEARTBEAT_STALE_SECONDS,
     WORKER_STATUS_FAILED,
@@ -368,6 +369,13 @@ async def list_processes(
 async def list_processes_page(
     client_id: str | None = Query(default=None),
     risk_filter: str = Query(default="todos"),
+    process_class: str | None = Query(default=None),
+    tribunal: str | None = Query(default=None),
+    data_status: str | None = Query(default=None),
+    agency: str | None = Query(default=None),
+    process_number: str | None = Query(default=None),
+    party_name: str | None = Query(default=None),
+    defendant: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
@@ -379,6 +387,16 @@ async def list_processes_page(
     )
     if client_id:
         base_statement = base_statement.where(ClientProcess.client_id == client_id)
+    base_statement = _apply_process_filters(
+        base_statement,
+        process_class=process_class,
+        tribunal=tribunal,
+        data_status=data_status,
+        agency=agency,
+        process_number=process_number,
+        party_name=party_name,
+        defendant=defendant,
+    )
     base_statement = _apply_process_risk_filter(base_statement, risk_filter)
 
     count_statement = select(func.count()).select_from(base_statement.order_by(None).subquery())
@@ -419,6 +437,19 @@ async def list_processes_page(
         page_size=page_size,
         total=total,
         total_pages=_total_pages(total, page_size),
+    )
+
+
+@router.get("/processes/filter-options", response_model=ProcessFilterOptionsRead)
+async def get_process_filter_options(
+    client_id: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> ProcessFilterOptionsRead:
+    return ProcessFilterOptionsRead(
+        process_classes=await _distinct_process_values(session, Process.process_class, client_id),
+        tribunals=await _distinct_process_values(session, Process.tribunal, client_id),
+        data_statuses=await _distinct_process_statuses(session, client_id),
+        agencies=await _distinct_process_values(session, Process.agency, client_id),
     )
 
 
@@ -688,6 +719,51 @@ def _worker_effective_status(worker: WorkerInstance, last_seen_seconds: int | No
     return worker.status
 
 
+def _apply_process_filters(
+    statement,
+    *,
+    process_class: str | None,
+    tribunal: str | None,
+    data_status: str | None,
+    agency: str | None,
+    process_number: str | None,
+    party_name: str | None,
+    defendant: str | None,
+):
+    process_class = _filter_text(process_class)
+    tribunal = _filter_text(tribunal)
+    data_status = _filter_text(data_status)
+    agency = _filter_text(agency)
+    process_number = _filter_text(process_number)
+    party_name = _filter_text(party_name)
+    defendant = _filter_text(defendant)
+
+    if process_class:
+        statement = statement.where(Process.process_class == process_class)
+    if tribunal:
+        statement = statement.where(Process.tribunal == tribunal)
+    if data_status:
+        if data_status == "pending":
+            statement = statement.where(or_(Process.datajud_status.is_(None), Process.datajud_status == data_status))
+        else:
+            statement = statement.where(Process.datajud_status == data_status)
+    if agency:
+        statement = statement.where(Process.agency == agency)
+    if process_number:
+        normalized_number = normalize_process_number(process_number)
+        if normalized_number:
+            statement = statement.where(Process.numero_processo.contains(normalized_number))
+        else:
+            statement = statement.where(
+                Process.formatted_number.ilike(f"%{_escape_like(process_number)}%", escape="\\")
+            )
+    if party_name:
+        statement = statement.where(_process_has_party(party_name))
+    if defendant:
+        statement = statement.where(_process_has_party(defendant, passive_only=True))
+    return statement
+
+
 def _apply_process_risk_filter(statement, risk_filter: str):
     if risk_filter == "com_risco":
         return statement.where(_process_has_risk_match())
@@ -707,6 +783,60 @@ def _process_has_risk_match(risk_level: str | None = None):
     if risk_level:
         risk_statement = risk_statement.join(RiskKeyword).where(RiskKeyword.risk_level == risk_level)
     return risk_statement.exists()
+
+
+def _process_has_party(name: str, *, passive_only: bool = False):
+    normalized_name = normalize_name(name)
+    party_statement = (
+        select(CommunicationParty.id)
+        .join(Communication, Communication.id == CommunicationParty.communication_id)
+        .where(
+            Communication.process_id == Process.id,
+            CommunicationParty.normalized_name.contains(normalized_name),
+        )
+    )
+    if passive_only:
+        party_statement = party_statement.where(func.upper(CommunicationParty.polo).in_(["P", "PASSIVO"]))
+    return party_statement.exists()
+
+
+async def _distinct_process_values(session: AsyncSession, column, client_id: str | None) -> list[str]:
+    statement = (
+        select(column)
+        .join(ClientProcess, ClientProcess.process_id == Process.id)
+        .where(column.is_not(None), column != "")
+        .distinct()
+        .order_by(column.asc())
+        .limit(250)
+    )
+    if client_id:
+        statement = statement.where(ClientProcess.client_id == client_id)
+    values = (await session.execute(statement)).scalars().all()
+    return [str(value) for value in values if value]
+
+
+async def _distinct_process_statuses(session: AsyncSession, client_id: str | None) -> list[str]:
+    status = func.coalesce(Process.datajud_status, "pending")
+    statement = (
+        select(status)
+        .join(ClientProcess, ClientProcess.process_id == Process.id)
+        .distinct()
+        .order_by(status.asc())
+        .limit(50)
+    )
+    if client_id:
+        statement = statement.where(ClientProcess.client_id == client_id)
+    values = (await session.execute(statement)).scalars().all()
+    return [str(value) for value in values if value]
+
+
+def _filter_text(value: str | None) -> str | None:
+    text = (value or "").strip()
+    return text or None
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _total_pages(total: int, page_size: int) -> int:

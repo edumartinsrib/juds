@@ -279,6 +279,13 @@ class ProcessPageRead(BaseModel):
     total_pages: int
 
 
+class ProcessFilterOptionsRead(BaseModel):
+    process_classes: list[str]
+    tribunals: list[str]
+    data_statuses: list[str]
+    agencies: list[str]
+
+
 class PartyRead(BaseModel):
     id: str
     communication_id: str

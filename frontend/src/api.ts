@@ -4,7 +4,9 @@ import type {
   CommunicationDetail,
   ProcessEnrichment,
   ProcessDetail,
+  ProcessFilterOptions,
   ProcessListItem,
+  ProcessPageFilters,
   PaginatedResponse,
   RiskKeyword,
   RiskKeywordMutation,
@@ -31,6 +33,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(detail || `Falha HTTP ${response.status}`);
   }
   return response.json() as Promise<T>;
+}
+
+function addOptionalParam(params: URLSearchParams, key: string, value: string | null | undefined) {
+  const text = (value ?? "").trim();
+  if (text) {
+    params.set(key, text);
+  }
 }
 
 export function listClients(): Promise<Client[]> {
@@ -96,11 +105,19 @@ export function listProcesses(clientId?: string | null): Promise<ProcessListItem
 export function listProcessesPage({
   clientId,
   riskFilter = "todos",
+  processClass,
+  tribunal,
+  dataStatus,
+  agency,
+  processNumber,
+  partyName,
+  defendant,
   page,
   pageSize,
 }: {
   clientId?: string | null;
   riskFilter?: string;
+} & Partial<ProcessPageFilters> & {
   page: number;
   pageSize: number;
 }): Promise<PaginatedResponse<ProcessListItem>> {
@@ -112,7 +129,19 @@ export function listProcessesPage({
   if (clientId) {
     params.set("client_id", clientId);
   }
+  addOptionalParam(params, "process_class", processClass);
+  addOptionalParam(params, "tribunal", tribunal);
+  addOptionalParam(params, "data_status", dataStatus);
+  addOptionalParam(params, "agency", agency);
+  addOptionalParam(params, "process_number", processNumber);
+  addOptionalParam(params, "party_name", partyName);
+  addOptionalParam(params, "defendant", defendant);
   return request<PaginatedResponse<ProcessListItem>>(`/api/processes/page?${params.toString()}`);
+}
+
+export function getProcessFilterOptions(clientId?: string | null): Promise<ProcessFilterOptions> {
+  const query = clientId ? `?client_id=${encodeURIComponent(clientId)}` : "";
+  return request<ProcessFilterOptions>(`/api/processes/filter-options${query}`);
 }
 
 export function getProcess(processId: string): Promise<ProcessDetail> {

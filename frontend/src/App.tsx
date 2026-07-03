@@ -51,6 +51,7 @@ import {
   deleteRiskKeyword,
   enrichProcess,
   exportUrl,
+  getProcessFilterOptions,
   getProcess,
   getSearchRun,
   getWorkerDashboard,
@@ -70,7 +71,9 @@ import type {
   Communication,
   ProcessDetail,
   ProcessEnrichment,
+  ProcessFilterOptions,
   ProcessListItem,
+  ProcessPageFilters,
   ProcessParty,
   RiskKeyword,
   RiskKeywordPayload,
@@ -100,6 +103,24 @@ const riskLevelOptions: Array<{ value: RiskLevel; label: string }> = [
 ];
 
 const pageSizeOptions = [5, 8, 9, 10, 20, 50];
+
+const emptyProcessFilterOptions: ProcessFilterOptions = {
+  process_classes: [],
+  tribunals: [],
+  data_statuses: [],
+  agencies: [],
+};
+
+const defaultProcessFilters: ProcessPageFilters = {
+  riskFilter: "todos",
+  processClass: "",
+  tribunal: "",
+  dataStatus: "",
+  agency: "",
+  processNumber: "",
+  partyName: "",
+  defendant: "",
+};
 
 type SearchPeriodPreset = "last_7" | "last_30" | "last_90" | "current_month" | "custom";
 
@@ -194,6 +215,7 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ["process"] });
       queryClient.invalidateQueries({ queryKey: ["processes"] });
       queryClient.invalidateQueries({ queryKey: ["processes-page"] });
+      queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
     },
     onError: (error) => {
       setRiskAutomation((current) => ({
@@ -214,6 +236,7 @@ export default function App() {
     queryClient.invalidateQueries({ queryKey: ["clients"] });
     queryClient.invalidateQueries({ queryKey: ["processes"] });
     queryClient.invalidateQueries({ queryKey: ["processes-page"] });
+    queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
 
     if (activeSearchOptions?.openMovementsWhenDone) {
       navigate("/movimentacoes");
@@ -398,6 +421,7 @@ function ClientsView({
       queryClient.invalidateQueries({ queryKey: ["clients"] });
       queryClient.invalidateQueries({ queryKey: ["processes"] });
       queryClient.invalidateQueries({ queryKey: ["processes-page"] });
+      queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
       if (selectedClientId === deletedClient.id) {
         onSelectClient(remainingClients[0]?.id ?? null);
       }
@@ -629,20 +653,33 @@ function ProcessesView({
   onSelectProcess: (processId: string) => void;
 }) {
   const navigate = useNavigate();
-  const [riskFilter, setRiskFilter] = useState("todos");
+  const [processFilters, setProcessFilters] = useState<ProcessPageFilters>(defaultProcessFilters);
+  const [filterDraft, setFilterDraft] = useState<ProcessPageFilters>(defaultProcessFilters);
   const [processPage, setProcessPage] = useState(1);
   const [processPageSize, setProcessPageSize] = useState(10);
 
   useEffect(() => {
     setProcessPage(1);
-  }, [processPageSize, riskFilter, selectedClientId]);
+  }, [processPageSize, processFilters, selectedClientId]);
+
+  useEffect(() => {
+    setProcessFilters(defaultProcessFilters);
+    setFilterDraft(defaultProcessFilters);
+  }, [selectedClientId]);
+
+  const filterOptionsQuery = useQuery({
+    queryKey: ["process-filter-options", selectedClientId],
+    queryFn: () => getProcessFilterOptions(selectedClientId),
+    enabled: Boolean(selectedClientId),
+  });
+  const filterOptions = filterOptionsQuery.data ?? emptyProcessFilterOptions;
 
   const processesQuery = useQuery({
-    queryKey: ["processes-page", selectedClientId, riskFilter, processPage, processPageSize],
+    queryKey: ["processes-page", selectedClientId, processFilters, processPage, processPageSize],
     queryFn: () =>
       listProcessesPage({
         clientId: selectedClientId,
-        riskFilter,
+        ...processFilters,
         page: processPage,
         pageSize: processPageSize,
       }),
@@ -656,6 +693,22 @@ function ProcessesView({
       setProcessPage(processPageData.total_pages);
     }
   }, [processPage, processPageData]);
+
+  const activeFilterCount = activeProcessFilterCount(processFilters);
+
+  function updateFilterDraft(key: keyof ProcessPageFilters, value: string) {
+    setFilterDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  function submitProcessFilters(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setProcessFilters(normalizeProcessFilters(filterDraft));
+  }
+
+  function clearProcessFilters() {
+    setFilterDraft(defaultProcessFilters);
+    setProcessFilters(defaultProcessFilters);
+  }
 
   const columns = useMemo<ColumnDef<ProcessListItem>[]>(
     () => [
@@ -731,38 +784,119 @@ function ProcessesView({
   return (
     <section className="v-stack gap-4 py-5">
       <Panel title="Processos" icon={<BriefcaseBusiness size={18} />}>
-        <div className="h-stack flex-wrap items-end gap-3">
-          <ClientSelect
-            clients={clients}
-            selectedClientId={selectedClientId}
-            onSelectClient={onSelectClient}
-          />
-          <button
-            className="ui-button h-stack items-center gap-2"
-            type="button"
-            onClick={() => processesQuery.refetch()}
-            disabled={!selectedClientId || processesQuery.isFetching}
-          >
-            <RefreshCw
-              className={cn({ "animate-spin": processesQuery.isFetching })}
-              size={17}
-              aria-hidden="true"
+        <form className="v-stack gap-4" onSubmit={submitProcessFilters}>
+          <div className="h-stack flex-wrap items-end gap-3">
+            <ClientSelect
+              clients={clients}
+              selectedClientId={selectedClientId}
+              onSelectClient={onSelectClient}
             />
-            Atualizar
-          </button>
-          <label className="v-stack min-w-[220px] gap-1 text-sm font-medium">
-            Filtro de risco
-            <select className="ui-input" value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)}>
-              <option value="todos">Todos</option>
-              <option value="com_risco">Com risco</option>
-              <option value="critico">Critico</option>
-              <option value="alto">Alto</option>
-              <option value="medio">Medio</option>
-              <option value="baixo">Baixo</option>
-              <option value="sem_risco">Sem risco</option>
-            </select>
-          </label>
-        </div>
+            <button
+              className="ui-button h-stack items-center gap-2"
+              type="button"
+              onClick={() => {
+                filterOptionsQuery.refetch();
+                processesQuery.refetch();
+              }}
+              disabled={!selectedClientId || processesQuery.isFetching || filterOptionsQuery.isFetching}
+            >
+              <RefreshCw
+                className={cn({ "animate-spin": processesQuery.isFetching || filterOptionsQuery.isFetching })}
+                size={17}
+                aria-hidden="true"
+              />
+              Atualizar
+            </button>
+            <button
+              className="ui-button ui-button-primary h-stack items-center gap-2"
+              type="submit"
+              disabled={!selectedClientId || processesQuery.isFetching}
+            >
+              <Search size={17} aria-hidden="true" />
+              Aplicar filtros
+            </button>
+            <button
+              className="ui-button h-stack items-center gap-2"
+              type="button"
+              disabled={!selectedClientId || activeFilterCount === 0}
+              onClick={clearProcessFilters}
+            >
+              <X size={17} aria-hidden="true" />
+              Limpar
+            </button>
+            {activeFilterCount > 0 && <Badge>{activeFilterCount} filtros ativos</Badge>}
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <label className="v-stack gap-1 text-sm font-medium">
+              Numero do processo
+              <input
+                className="ui-input"
+                value={filterDraft.processNumber}
+                placeholder="Digite numero ou trecho"
+                disabled={!selectedClientId}
+                onChange={(event) => updateFilterDraft("processNumber", event.target.value)}
+              />
+            </label>
+            <ProcessOptionFilter
+              label="Tipo do processo"
+              value={filterDraft.processClass}
+              options={filterOptions.process_classes}
+              disabled={!selectedClientId || filterOptionsQuery.isLoading}
+              onChange={(value) => updateFilterDraft("processClass", value)}
+            />
+            <label className="v-stack gap-1 text-sm font-medium">
+              Parte re
+              <input
+                className="ui-input"
+                value={filterDraft.defendant}
+                placeholder="Nome no polo passivo"
+                disabled={!selectedClientId}
+                onChange={(event) => updateFilterDraft("defendant", event.target.value)}
+              />
+            </label>
+            <label className="v-stack gap-1 text-sm font-medium">
+              Qualquer parte
+              <input
+                className="ui-input"
+                value={filterDraft.partyName}
+                placeholder="Autor, reu ou interessado"
+                disabled={!selectedClientId}
+                onChange={(event) => updateFilterDraft("partyName", event.target.value)}
+              />
+            </label>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <ProcessOptionFilter
+              label="Tribunal"
+              value={filterDraft.tribunal}
+              options={filterOptions.tribunals}
+              disabled={!selectedClientId || filterOptionsQuery.isLoading}
+              onChange={(value) => updateFilterDraft("tribunal", value)}
+            />
+            <ProcessOptionFilter
+              label="Orgao"
+              value={filterDraft.agency}
+              options={filterOptions.agencies}
+              disabled={!selectedClientId || filterOptionsQuery.isLoading}
+              onChange={(value) => updateFilterDraft("agency", value)}
+            />
+            <ProcessOptionFilter
+              label="Status dos dados"
+              value={filterDraft.dataStatus}
+              options={filterOptions.data_statuses}
+              disabled={!selectedClientId || filterOptionsQuery.isLoading}
+              formatOption={processDataStatusLabel}
+              onChange={(value) => updateFilterDraft("dataStatus", value)}
+            />
+            <RiskFilter
+              value={filterDraft.riskFilter}
+              disabled={!selectedClientId}
+              onChange={(value) => updateFilterDraft("riskFilter", value)}
+            />
+          </div>
+        </form>
       </Panel>
 
       <Panel title="Resultado" icon={<ListFilter size={18} />}>
@@ -894,6 +1028,7 @@ function MovementsView({
       queryClient.setQueryData(["process", result.process.id], result.process);
       queryClient.invalidateQueries({ queryKey: ["processes"] });
       queryClient.invalidateQueries({ queryKey: ["processes-page"] });
+      queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
       queryClient.invalidateQueries({ queryKey: ["clients"] });
     },
   });
@@ -1039,6 +1174,7 @@ function RiskManagementView() {
     queryClient.invalidateQueries({ queryKey: ["risk-keywords"] });
     queryClient.invalidateQueries({ queryKey: ["processes"] });
     queryClient.invalidateQueries({ queryKey: ["processes-page"] });
+    queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
     queryClient.invalidateQueries({ queryKey: ["process"] });
   }
 
@@ -1765,11 +1901,24 @@ function RiskLevelSelect({
   );
 }
 
-function RiskFilter({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function RiskFilter({
+  value,
+  disabled = false,
+  onChange,
+}: {
+  value: string;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+}) {
   return (
     <label className="v-stack gap-1 text-sm font-medium">
       Risco
-      <select className="ui-input" value={value} onChange={(event) => onChange(event.target.value)}>
+      <select
+        className="ui-input"
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      >
         <option value="todos">Todos</option>
         <option value="com_risco">Com risco</option>
         <option value="critico">Critico</option>
@@ -2060,6 +2209,41 @@ function SelectFilter({
         {options.map((option) => (
           <option key={option} value={option}>
             {label === "Data" ? formatDate(option) : option}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function ProcessOptionFilter({
+  label,
+  value,
+  options,
+  disabled = false,
+  formatOption,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  disabled?: boolean;
+  formatOption?: (value: string) => string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="v-stack gap-1 text-sm font-medium">
+      {label}
+      <select
+        className="ui-input"
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        <option value="">Todos</option>
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {formatOption ? formatOption(option) : option}
           </option>
         ))}
       </select>
@@ -2668,6 +2852,33 @@ function workerRunProgress(currentDate: string | null, startDate: string, endDat
 
 function uniqueOptions(values: Array<string | null | undefined> | undefined): string[] {
   return Array.from(new Set((values ?? []).filter((value): value is string => Boolean(value)))).sort();
+}
+
+function normalizeProcessFilters(filters: ProcessPageFilters): ProcessPageFilters {
+  return {
+    riskFilter: filters.riskFilter || "todos",
+    processClass: filters.processClass.trim(),
+    tribunal: filters.tribunal.trim(),
+    dataStatus: filters.dataStatus.trim(),
+    agency: filters.agency.trim(),
+    processNumber: filters.processNumber.trim(),
+    partyName: filters.partyName.trim(),
+    defendant: filters.defendant.trim(),
+  };
+}
+
+function activeProcessFilterCount(filters: ProcessPageFilters): number {
+  const normalized = normalizeProcessFilters(filters);
+  return [
+    normalized.riskFilter !== "todos",
+    Boolean(normalized.processClass),
+    Boolean(normalized.tribunal),
+    Boolean(normalized.dataStatus),
+    Boolean(normalized.agency),
+    Boolean(normalized.processNumber),
+    Boolean(normalized.partyName),
+    Boolean(normalized.defendant),
+  ].filter(Boolean).length;
 }
 
 function poloLabel(polo: string | null | undefined): string {

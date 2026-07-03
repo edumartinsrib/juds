@@ -64,7 +64,8 @@ npm run build
 - `POST /api/workers`
 - `POST /api/workers/{id}/stop`
 - `GET /api/processes?client_id=...`
-- `GET /api/processes/page?client_id=...&page=1&page_size=10`
+- `GET /api/processes/page?client_id=...&page=1&page_size=10&process_class=...&defendant=...`
+- `GET /api/processes/filter-options?client_id=...`
 - `GET /api/processes/{id}`
 - `POST /api/processes/{id}/enrich`
 - `GET /api/communications/{id}`

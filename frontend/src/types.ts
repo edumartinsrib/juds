@@ -21,6 +21,24 @@ export type PaginatedResponse<T> = {
   total_pages: number;
 };
 
+export type ProcessPageFilters = {
+  riskFilter: string;
+  processClass: string;
+  tribunal: string;
+  dataStatus: string;
+  agency: string;
+  processNumber: string;
+  partyName: string;
+  defendant: string;
+};
+
+export type ProcessFilterOptions = {
+  process_classes: string[];
+  tribunals: string[];
+  data_statuses: string[];
+  agencies: string[];
+};
+
 export type SearchRun = {
   id: string;
   client_id: string;
