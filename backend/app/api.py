@@ -14,8 +14,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
+from app.audit import audit_process_integrity
 from app.db import get_session
-from app.datajud import DataJudClient, datajud_movements, datajud_subject_names
+from app.datajud import (
+    DATAJUD_STATUS_SYNCED,
+    DataJudClient,
+    datajud_movements,
+    datajud_object_name,
+    datajud_subject_names,
+    latest_datajud_movement_datetime,
+    parse_datajud_datetime,
+)
 from app.djen import DjenClient, DjenRateLimitError
 from app.importer import DjenImporter, enqueue_search_run
 from app.models import (
@@ -26,7 +35,10 @@ from app.models import (
     CommunicationParty,
     Lawyer,
     Process,
+    ProcessAuditIssue,
+    ProcessEvent,
     ProcessPhaseKeyword,
+    ProcessSource,
     CommunicationRiskMatch,
     RiskKeyword,
     SearchRun,
@@ -51,6 +63,9 @@ from app.phases import (
     restore_default_phase_keywords,
 )
 from app.schemas import (
+    AuditIssueRead,
+    AuditIssueResolution,
+    AuditReportRead,
     ClientCreate,
     ClientRead,
     ClientUpdate,
@@ -71,6 +86,7 @@ from app.schemas import (
     ProcessPhaseMatchRead,
     ProcessListItem,
     ProcessPartyRead,
+    ProcessSourceRead,
     RiskKeywordCreate,
     RiskKeywordMutationRead,
     RiskKeywordRead,
@@ -79,6 +95,7 @@ from app.schemas import (
     RiskReprocessRead,
     SearchRunCreate,
     SearchRunRead,
+    TimelineEventRead,
     WorkerDashboardRead,
     WorkerRead,
     WorkerRunRead,
@@ -597,6 +614,121 @@ async def get_process(process_id: str, session: AsyncSession = Depends(get_sessi
     return _process_detail(process, phase_keywords)
 
 
+@router.post(
+    "/processes/{process_id}/sources/{source_id}/select",
+    response_model=ProcessDetail,
+)
+async def select_process_source(
+    process_id: str,
+    source_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ProcessDetail:
+    process = await session.get(Process, process_id)
+    source = await session.get(ProcessSource, source_id)
+    if not process or not source or source.process_id != process.id:
+        raise HTTPException(status_code=404, detail="Instancia do processo nao encontrada")
+    if source.source != "DATAJUD":
+        raise HTTPException(
+            status_code=422,
+            detail="Somente instancias DataJud podem definir a capa atual",
+        )
+    if source.numero_processo != process.numero_processo:
+        raise HTTPException(
+            status_code=422,
+            detail="Instancia DataJud possui numero divergente do processo canonico",
+        )
+
+    sources = (
+        await session.execute(
+            select(ProcessSource).where(
+                ProcessSource.process_id == process.id,
+                ProcessSource.source == "DATAJUD",
+            )
+        )
+    ).scalars().all()
+    for candidate in sources:
+        candidate.selected_for_cover = candidate.id == source.id
+        candidate.review_required = False
+        if candidate.id == source.id:
+            candidate.selection_reason = "user_selected"
+
+    _apply_process_source_to_cover(process, source)
+    open_issues = (
+        await session.execute(
+            select(ProcessAuditIssue).where(
+                ProcessAuditIssue.process_id == process.id,
+                ProcessAuditIssue.status == "open",
+                ProcessAuditIssue.issue_type.in_(
+                    {"datajud_multiple_hits", "datajud_process_number_conflict"}
+                ),
+            )
+        )
+    ).scalars().all()
+    for issue in open_issues:
+        issue.status = "resolved"
+        issue.resolved_at = datetime.now(timezone.utc)
+        issue.details = {
+            **(issue.details or {}),
+            "resolved_by": "user_selected_source",
+            "selected_source_id": source.id,
+            "selected_source_record_id": source.source_record_id,
+        }
+    await session.commit()
+
+    refreshed = await _get_process_for_detail(session, process.id)
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="Processo nao encontrado")
+    phase_keywords = await list_active_phase_keywords(session)
+    return _process_detail(refreshed, phase_keywords)
+
+
+@router.post("/integrity/audit", response_model=AuditReportRead)
+async def run_integrity_audit(
+    session: AsyncSession = Depends(get_session),
+) -> AuditReportRead:
+    report = await audit_process_integrity(session, persist=True)
+    return AuditReportRead.model_validate(report.to_dict())
+
+
+@router.get("/integrity/issues", response_model=list[AuditIssueRead])
+async def list_integrity_issues(
+    status: str | None = Query(default="open"),
+    session: AsyncSession = Depends(get_session),
+) -> list[AuditIssueRead]:
+    statement = select(ProcessAuditIssue).order_by(
+        ProcessAuditIssue.created_at.desc(),
+        ProcessAuditIssue.issue_type.asc(),
+    )
+    if status:
+        statement = statement.where(ProcessAuditIssue.status == status)
+    issues = (await session.execute(statement)).scalars().all()
+    return [_audit_issue_read(issue) for issue in issues]
+
+
+@router.patch(
+    "/integrity/issues/{issue_id}/resolve",
+    response_model=AuditIssueRead,
+)
+async def resolve_integrity_issue(
+    issue_id: str,
+    payload: AuditIssueResolution,
+    session: AsyncSession = Depends(get_session),
+) -> AuditIssueRead:
+    issue = await session.get(ProcessAuditIssue, issue_id)
+    if not issue:
+        raise HTTPException(status_code=404, detail="Ocorrencia de auditoria nao encontrada")
+    issue.status = "resolved"
+    issue.resolved_at = datetime.now(timezone.utc)
+    issue.details = {
+        **(issue.details or {}),
+        "resolution_reason": payload.reason,
+        "resolved_by": "manual_review",
+    }
+    await session.commit()
+    await session.refresh(issue)
+    return _audit_issue_read(issue)
+
+
 @router.post("/processes/{process_id}/enrich", response_model=ProcessEnrichmentRead)
 async def enrich_process(
     process_id: str,
@@ -660,6 +792,8 @@ async def _get_process_for_detail(session: AsyncSession, process_id: str) -> Pro
             .selectinload(Communication.communication_lawyers)
             .selectinload(CommunicationLawyer.lawyer),
             selectinload(Process.client_processes).selectinload(ClientProcess.client),
+            selectinload(Process.sources),
+            selectinload(Process.events),
         )
     )
     return result.scalar_one_or_none()
@@ -670,20 +804,52 @@ def _process_detail(
     phase_keywords: list[ProcessPhaseKeyword],
 ) -> ProcessDetail:
     client_process = process.client_processes[0] if process.client_processes else None
-    timeline = sorted(process.communications, key=lambda item: (item.data_disponibilizacao, item.id))
-    parties = [party for communication in timeline for party in communication.parties]
+    communications = sorted(
+        process.communications,
+        key=lambda item: (item.data_disponibilizacao, item.id),
+        reverse=True,
+    )
+    communication_by_id = {
+        communication.id: communication for communication in communications
+    }
+    timeline = sorted(
+        process.events,
+        key=lambda event: (event.occurred_at, event.id),
+        reverse=True,
+    )
+    parties = [party for communication in communications for party in communication.parties]
     lawyers = {
         link.lawyer.id: link.lawyer
-        for communication in timeline
+        for communication in communications
         for link in communication.communication_lawyers
     }
     base = _process_item(process, client_process, phase_keywords)
+    djen_count = sum(1 for event in timeline if event.source == "DJEN")
+    datajud_count = sum(1 for event in timeline if event.source == "DATAJUD")
     return ProcessDetail(
         **base.model_dump(),
         datajud=_datajud_read(process),
         parties=[_party_read(party) for party in parties],
         lawyers=[_lawyer_read(lawyer) for lawyer in lawyers.values()],
-        timeline=[_communication_item(communication) for communication in timeline],
+        sources=[
+            _process_source_read(source)
+            for source in sorted(
+                process.sources,
+                key=lambda item: (
+                    not item.selected_for_cover,
+                    item.source,
+                    item.degree or "",
+                    item.source_record_id,
+                ),
+            )
+        ],
+        timeline=[
+            _timeline_event_read(event, communication_by_id.get(event.communication_id))
+            for event in timeline
+        ],
+        djen_publications_count=djen_count,
+        datajud_movements_count=datajud_count,
+        total_events=len(timeline),
     )
 
 
@@ -781,6 +947,23 @@ def _search_run_read(run: SearchRun) -> SearchRunRead:
         created_at=run.created_at,
         started_at=run.started_at,
         finished_at=run.finished_at,
+    )
+
+
+def _audit_issue_read(issue: ProcessAuditIssue) -> AuditIssueRead:
+    return AuditIssueRead(
+        id=issue.id,
+        process_id=issue.process_id,
+        communication_id=issue.communication_id,
+        issue_key=issue.issue_key,
+        issue_type=issue.issue_type,
+        severity=issue.severity,
+        status=issue.status,
+        summary=issue.summary,
+        details=issue.details or {},
+        resolved_at=issue.resolved_at,
+        created_at=issue.created_at,
+        updated_at=issue.updated_at,
     )
 
 
@@ -1004,6 +1187,10 @@ def _process_item(
         external_link=process.external_link,
         cpf_status=client_process.cpf_status if client_process else "ausente_no_djen",
         polo=client_process.polo if client_process else None,
+        association_status=(
+            client_process.association_status if client_process else "uncertain"
+        ),
+        association_reason=client_process.association_reason if client_process else None,
         communications_count=client_process.communications_count if client_process else 0,
         last_movement_at=client_process.last_movement_at if client_process else process.last_communication_at,
         datajud_status=process.datajud_status or "pending",
@@ -1176,9 +1363,92 @@ def _datajud_read(process: Process) -> DataJudRead:
         format=process.datajud_format,
         subjects=datajud_subject_names(process.datajud_payload),
         movements_count=process.datajud_movements_count or 0,
+        hit_count=process.datajud_hit_count or 0,
+        source_id=process.datajud_source_id,
+        candidate_source_id=process.datajud_candidate_source_id,
+        selection_reason=process.datajud_selection_reason,
+        review_reason=process.datajud_review_reason,
         error=process.datajud_error,
         movements=movements,
     )
+
+
+def _process_source_read(source: ProcessSource) -> ProcessSourceRead:
+    return ProcessSourceRead(
+        id=source.id,
+        source=source.source,
+        source_alias=source.source_alias,
+        source_record_id=source.source_record_id,
+        numero_processo=source.numero_processo,
+        tribunal=source.tribunal,
+        degree=source.degree,
+        process_class=source.process_class,
+        agency=source.agency,
+        source_updated_at=source.source_updated_at,
+        filed_at=source.filed_at,
+        selected_for_cover=source.selected_for_cover,
+        selection_reason=source.selection_reason,
+        review_required=source.review_required,
+    )
+
+
+def _timeline_event_read(
+    event: ProcessEvent,
+    communication: Communication | None,
+) -> TimelineEventRead:
+    return TimelineEventRead(
+        event_id=event.id,
+        process_id=event.process_id,
+        communication_id=event.communication_id,
+        source=event.source,
+        source_record_id=event.source_record_id,
+        event_type=event.event_type,
+        occurred_at=event.occurred_at,
+        tribunal=event.tribunal,
+        degree=event.degree,
+        process_class=event.process_class,
+        agency=event.agency,
+        title=event.title,
+        text=event.text,
+        complements=[
+            value for value in (event.complements or []) if isinstance(value, str)
+        ],
+        external_link=event.external_link,
+        risk_matches=(
+            _risk_matches_read(communication.risk_matches) if communication else []
+        ),
+    )
+
+
+def _apply_process_source_to_cover(
+    process: Process,
+    source_record: ProcessSource,
+) -> None:
+    source = source_record.raw_payload
+    process.datajud_status = DATAJUD_STATUS_SYNCED
+    process.datajud_source_id = source_record.id
+    process.datajud_candidate_source_id = source_record.id
+    process.datajud_selection_reason = "user_selected"
+    process.datajud_review_reason = None
+    process.datajud_error = None
+    process.datajud_synced_at = datetime.now(timezone.utc)
+    process.datajud_payload = source
+    process.tribunal = _to_str(source.get("tribunal")) or process.tribunal
+    process.process_class = datajud_object_name(source.get("classe")) or process.process_class
+    process.agency = datajud_object_name(source.get("orgaoJulgador")) or process.agency
+    process.datajud_source_updated_at = parse_datajud_datetime(
+        source.get("dataHoraUltimaAtualizacao")
+    )
+    process.datajud_last_movement_at = latest_datajud_movement_datetime(source)
+    process.datajud_filed_at = parse_datajud_datetime(source.get("dataAjuizamento"))
+    process.datajud_degree = _to_str(source.get("grau"))
+    process.datajud_secrecy_level = _to_int(source.get("nivelSigilo"))
+    process.datajud_system = datajud_object_name(source.get("sistema"))
+    process.datajud_format = datajud_object_name(source.get("formato"))
+    subjects = source.get("assuntos")
+    process.datajud_subjects = subjects if isinstance(subjects, list) else []
+    movements = source.get("movimentos")
+    process.datajud_movements_count = len(movements) if isinstance(movements, list) else 0
 
 
 def _party_read(party: CommunicationParty) -> PartyRead:

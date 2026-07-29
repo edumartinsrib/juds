@@ -337,6 +337,8 @@ class ProcessListItem(BaseModel):
     external_link: str | None
     cpf_status: str
     polo: str | None
+    association_status: str
+    association_reason: str | None
     communications_count: int
     last_movement_at: date | None
     datajud_status: str
@@ -427,15 +429,102 @@ class DataJudRead(BaseModel):
     format: str | None
     subjects: list[str]
     movements_count: int
+    hit_count: int
+    source_id: str | None
+    candidate_source_id: str | None
+    selection_reason: str | None
+    review_reason: str | None
     error: str | None
     movements: list[DataJudMovementRead]
+
+
+class ProcessSourceRead(BaseModel):
+    id: str
+    source: str
+    source_alias: str | None
+    source_record_id: str
+    numero_processo: str
+    tribunal: str | None
+    degree: str | None
+    process_class: str | None
+    agency: str | None
+    source_updated_at: datetime | None
+    filed_at: datetime | None
+    selected_for_cover: bool
+    selection_reason: str | None
+    review_required: bool
+
+
+class TimelineEventRead(BaseModel):
+    event_id: str
+    process_id: str
+    communication_id: str | None
+    source: str
+    source_record_id: str
+    event_type: str
+    occurred_at: datetime
+    tribunal: str | None
+    degree: str | None
+    process_class: str | None
+    agency: str | None
+    title: str | None
+    text: str
+    complements: list[str]
+    external_link: str | None
+    risk_matches: list[RiskMatchRead]
 
 
 class ProcessDetail(ProcessListItem):
     datajud: DataJudRead
     parties: list[PartyRead]
     lawyers: list[LawyerRead]
-    timeline: list[CommunicationListItem]
+    sources: list[ProcessSourceRead]
+    timeline: list[TimelineEventRead]
+    djen_publications_count: int
+    datajud_movements_count: int
+    total_events: int
+
+
+class AuditFindingRead(BaseModel):
+    issue_key: str
+    issue_type: str
+    severity: str
+    summary: str
+    process_id: str | None
+    communication_id: str | None
+    details: dict
+
+
+class AuditReportRead(BaseModel):
+    scanned_processes: int
+    scanned_communications: int
+    findings: list[AuditFindingRead]
+    unresolved_count: int
+    generated_at: str
+
+
+class AuditIssueResolution(BaseModel):
+    reason: str = Field(min_length=5, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        return " ".join(value.strip().split())
+
+
+class AuditIssueRead(BaseModel):
+    id: str
+    process_id: str | None
+    communication_id: str | None
+    issue_key: str
+    issue_type: str
+    severity: str
+    status: str
+    summary: str
+    details: dict
+    resolved_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class ProcessEnrichmentRead(BaseModel):

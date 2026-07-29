@@ -64,6 +64,7 @@ import {
   listRiskKeywords,
   reprocessRiskKeywords,
   restoreProcessPhaseDefaults,
+  selectProcessSource,
   startWorker,
   stopWorker,
   updateClient,
@@ -74,7 +75,6 @@ import { cn } from "./lib/cn";
 import type {
   Client,
   ClientPayload,
-  Communication,
   ProcessDetail,
   ProcessEnrichment,
   ProcessFilterOptions,
@@ -83,6 +83,7 @@ import type {
   ProcessPhaseKeyword,
   ProcessPhaseKeywordPayload,
   ProcessParty,
+  ProcessTimelineEvent,
   RiskKeyword,
   RiskKeywordPayload,
   RiskLevel,
@@ -97,7 +98,7 @@ import type {
 const navItems = [
   { to: "/", label: "Clientes", icon: Users },
   { to: "/processos", label: "Processos", icon: BriefcaseBusiness },
-  { to: "/movimentacoes", label: "Movimentacoes", icon: Gavel },
+  { to: "/movimentacoes", label: "Eventos processuais", icon: Gavel },
   { to: "/riscos", label: "Riscos", icon: ShieldAlert },
   { to: "/workers", label: "Robos", icon: ServerCog },
   { to: "/exportacoes", label: "Exportacoes", icon: FileDown },
@@ -301,7 +302,7 @@ export default function App() {
             <div className="min-w-0">
               <h1 className="truncate text-xl font-semibold">JUDS</h1>
               <p className="truncate text-sm text-neutral-600">
-                Gestao de processos e movimentacoes
+                Gestao de processos, publicacoes e movimentos
               </p>
             </div>
           </div>
@@ -526,7 +527,7 @@ function ClientsView({
             ) : (
               <Search size={17} aria-hidden="true" />
             )}
-            Buscar movimentacoes
+            Buscar publicacoes
           </button>
           <MutationError error={searchMutation.error} />
           <RunStatus
@@ -626,7 +627,7 @@ function ClientsView({
                     </div>
                     <div className="grid grid-cols-3 gap-2 text-sm">
                       <Metric label="Processos" value={client.process_count} />
-                      <Metric label="Movs." value={client.communication_count} />
+                      <Metric label="Publicacoes" value={client.communication_count} />
                       <Metric label="Filas" value={client.pending_runs} />
                     </div>
                   </article>
@@ -768,6 +769,13 @@ function ProcessesView({
         cell: ({ row }) => <ProcessDataStatusBadge status={row.original.datajud_status} />,
       },
       {
+        header: "Vinculo",
+        accessorKey: "association_status",
+        cell: ({ row }) => (
+          <AssociationStatusBadge status={row.original.association_status} />
+        ),
+      },
+      {
         header: "Ultima",
         accessorKey: "last_movement_at",
         cell: ({ row }) => (
@@ -775,7 +783,7 @@ function ProcessesView({
         ),
       },
       {
-        header: "Movs.",
+        header: "Publicacoes",
         accessorKey: "communications_count",
         cell: ({ row }) => <span className="font-medium">{row.original.communications_count}</span>,
       },
@@ -786,7 +794,7 @@ function ProcessesView({
           <button
             className="ui-icon-button"
             type="button"
-            title="Abrir movimentacoes"
+            title="Abrir linha do tempo"
             onClick={() => {
               onSelectProcess(row.original.id);
               navigate("/movimentacoes");
@@ -989,6 +997,7 @@ function MovementsView({
   onSelectProcess: (processId: string) => void;
 }) {
   const queryClient = useQueryClient();
+  const [sourceFilter, setSourceFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [tribunalFilter, setTribunalFilter] = useState("");
   const [dateFilter, setDateFilter] = useState("");
@@ -1059,26 +1068,40 @@ function MovementsView({
     },
   });
 
+  const sourceMutation = useMutation({
+    mutationFn: (sourceId: string) => selectProcessSource(selectedProcessId!, sourceId),
+    onSuccess: (result) => {
+      queryClient.setQueryData(["process", result.id], result);
+      queryClient.invalidateQueries({ queryKey: ["processes"] });
+      queryClient.invalidateQueries({ queryKey: ["processes-page"] });
+      queryClient.invalidateQueries({ queryKey: ["process-filter-options"] });
+    },
+  });
+
   const detail = detailQuery.data ?? null;
   const filteredTimeline = useMemo(() => {
     const timeline = detail?.timeline ?? [];
-    return timeline.filter((communication) => {
-      const byType = !typeFilter || communication.tipo_comunicacao === typeFilter;
-      const byTribunal = !tribunalFilter || communication.sigla_tribunal === tribunalFilter;
-      const byDate = !dateFilter || communication.data_disponibilizacao === dateFilter;
+    return timeline.filter((event) => {
+      const bySource = !sourceFilter || event.source === sourceFilter;
+      const byType = !typeFilter || event.event_type === typeFilter;
+      const byTribunal = !tribunalFilter || event.tribunal === tribunalFilter;
+      const byDate = !dateFilter || event.occurred_at.slice(0, 10) === dateFilter;
       const byRisk =
         riskFilter === "todos" ||
-        (riskFilter === "com_risco" && communication.risk_matches.length > 0) ||
-        (riskFilter === "sem_risco" && communication.risk_matches.length === 0) ||
-        communication.risk_matches.some((match) => match.risk_level === riskFilter);
-      return byType && byTribunal && byDate && byRisk;
+        (riskFilter === "com_risco" && event.risk_matches.length > 0) ||
+        (riskFilter === "sem_risco" && event.risk_matches.length === 0) ||
+        event.risk_matches.some((match) => match.risk_level === riskFilter);
+      return bySource && byType && byTribunal && byDate && byRisk;
     });
-  }, [dateFilter, detail?.timeline, riskFilter, tribunalFilter, typeFilter]);
+  }, [dateFilter, detail?.timeline, riskFilter, sourceFilter, tribunalFilter, typeFilter]);
   const movementPagination = usePaginatedItems(filteredTimeline, 5);
 
-  const typeOptions = uniqueOptions(detail?.timeline.map((item) => item.tipo_comunicacao));
-  const tribunalOptions = uniqueOptions(detail?.timeline.map((item) => item.sigla_tribunal));
-  const dateOptions = uniqueOptions(detail?.timeline.map((item) => item.data_disponibilizacao));
+  const sourceOptions = uniqueOptions(detail?.timeline.map((item) => item.source));
+  const typeOptions = uniqueOptions(detail?.timeline.map((item) => item.event_type));
+  const tribunalOptions = uniqueOptions(detail?.timeline.map((item) => item.tribunal));
+  const dateOptions = uniqueOptions(
+    detail?.timeline.map((item) => item.occurred_at.slice(0, 10)),
+  );
 
   return (
     <section className="grid gap-4 py-5 lg:grid-cols-[320px_1fr]">
@@ -1100,6 +1123,7 @@ function MovementsView({
                 <div className="h-stack flex-wrap gap-2">
                   <Badge>{process.tribunal ?? "Tribunal ausente"}</Badge>
                   <ProcessDataStatusBadge status={process.datajud_status} />
+                  <AssociationStatusBadge status={process.association_status} />
                   <ProcessPhaseSummary process={process} compact />
                   <ProcessRiskSummary process={process} compact />
                 </div>
@@ -1121,9 +1145,9 @@ function MovementsView({
         </div>
       </Panel>
 
-      <Panel title="Movimentacoes" icon={<Gavel size={18} />}>
+      <Panel title="Linha do tempo" icon={<Gavel size={18} />}>
         {detailQuery.isLoading ? (
-          <LoadingState label="Carregando movimentacoes" />
+          <LoadingState label="Carregando eventos processuais" />
         ) : detail ? (
           <div className="v-stack gap-4">
             <ProcessSummary detail={detail} />
@@ -1137,9 +1161,17 @@ function MovementsView({
               onEnrichmentStartDateChange={setEnrichmentStartDate}
               onEnrichmentEndDateChange={setEnrichmentEndDate}
               onEnrich={() => selectedProcessId && enrichMutation.mutate()}
+              isSelectingSource={sourceMutation.isPending}
+              selectSourceError={sourceMutation.error}
+              onSelectSource={(sourceId) => sourceMutation.mutate(sourceId)}
             />
-            <ComplementaryMovements detail={detail} />
-            <div className="grid gap-3 md:grid-cols-4">
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              <SelectFilter
+                label="Fonte"
+                value={sourceFilter}
+                options={sourceOptions}
+                onChange={setSourceFilter}
+              />
               <SelectFilter label="Tipo" value={typeFilter} options={typeOptions} onChange={setTypeFilter} />
               <SelectFilter
                 label="Tribunal"
@@ -1152,13 +1184,13 @@ function MovementsView({
             </div>
             <div className="v-stack gap-3">
               <div className="h-stack flex-wrap items-center gap-2">
-                <h3 className="text-sm font-semibold">Movimentacoes</h3>
+                <h3 className="text-sm font-semibold">Linha do tempo processual</h3>
                 <Badge>{filteredTimeline.length}</Badge>
               </div>
-              {movementPagination.items.map((communication) => (
+              {movementPagination.items.map((event) => (
                 <TimelineItem
-                  key={communication.id}
-                  communication={communication}
+                  key={event.event_id}
+                  event={event}
                   terms={highlightTerms(detail, selectedClient)}
                 />
               ))}
@@ -1169,7 +1201,7 @@ function MovementsView({
                   pageCount={movementPagination.pageCount}
                   pageSize={movementPagination.pageSize}
                   totalItems={movementPagination.totalItems}
-                  itemLabel="movimentacoes"
+                  itemLabel="eventos"
                   onPageChange={movementPagination.setPage}
                   onPageSizeChange={movementPagination.setPageSize}
                 />
@@ -1301,7 +1333,7 @@ function RiskManagementView() {
             ) : (
               <RotateCw size={17} aria-hidden="true" />
             )}
-            Reprocessar movimentacoes
+            Reprocessar publicacoes
           </button>
           <MutationError error={reprocessMutation.error} />
           {lastReprocess && <RiskReprocessSummary result={lastReprocess} />}
@@ -1312,7 +1344,7 @@ function RiskManagementView() {
         {keywordsQuery.isLoading ? (
           <LoadingState label="Carregando palavras de risco" />
         ) : keywords.length === 0 ? (
-          <EmptyState label="Cadastre a primeira palavra para classificar movimentacoes." />
+          <EmptyState label="Cadastre a primeira palavra para classificar publicacoes." />
         ) : (
           <div className="v-stack gap-3">
             {keywordPagination.items.map((keyword) => {
@@ -1967,7 +1999,7 @@ function MovementSearchModal({
               <Search size={19} aria-hidden="true" />
             </div>
             <div className="min-w-0 grow">
-              <h2 id="movement-search-title" className="text-lg font-semibold">Buscar movimentacoes</h2>
+              <h2 id="movement-search-title" className="text-lg font-semibold">Buscar publicacoes</h2>
               <p className="mt-1 truncate text-sm text-neutral-600">{client.name}</p>
             </div>
             <button
@@ -2047,7 +2079,7 @@ function MovementSearchModal({
                 onChange={(event) => setForm({ ...form, openMovementsWhenDone: event.target.checked })}
               />
               <span className="v-stack gap-1">
-                <span className="text-sm font-semibold">Abrir movimentacoes ao concluir</span>
+                <span className="text-sm font-semibold">Abrir linha do tempo ao concluir</span>
                 <span className="text-xs leading-5 text-neutral-600">
                   Direciona para a timeline depois da busca.
                 </span>
@@ -2396,12 +2428,13 @@ function RunStatus({
 
 function ProcessSummary({ detail }: { detail: ProcessDetail }) {
   return (
-    <div className="grid gap-3 border-b border-line pb-4 md:grid-cols-4">
+    <div className="grid gap-3 border-b border-line pb-4 md:grid-cols-6">
       <Metric label="Processo" value={detail.formatted_number} wide />
       <Metric label="Tribunal" value={detail.tribunal ?? "Ausente"} />
-      <Metric label="Movs." value={detail.communications_count} />
-      <Metric label="Ultima" value={formatDate(detail.last_movement_at)} />
-      <div className="v-stack gap-2 md:col-span-4">
+      <Metric label="Publicacoes DJEN" value={detail.djen_publications_count} />
+      <Metric label="Movimentos DataJud" value={detail.datajud_movements_count} />
+      <Metric label="Total de eventos" value={detail.total_events} />
+      <div className="v-stack gap-2 md:col-span-6">
         <ProcessParties parties={detail.process_parties} />
         <ProcessPhaseSummary process={detail} />
         <ProcessRiskSummary process={detail} />
@@ -2434,6 +2467,9 @@ function ProcessInformationPanel({
   onEnrichmentStartDateChange,
   onEnrichmentEndDateChange,
   onEnrich,
+  isSelectingSource,
+  selectSourceError,
+  onSelectSource,
 }: {
   detail: ProcessDetail;
   enrichmentStartDate: string;
@@ -2444,6 +2480,9 @@ function ProcessInformationPanel({
   onEnrichmentStartDateChange: (value: string) => void;
   onEnrichmentEndDateChange: (value: string) => void;
   onEnrich: () => void;
+  isSelectingSource: boolean;
+  selectSourceError: Error | null;
+  onSelectSource: (sourceId: string) => void;
 }) {
   const complementary = detail.datajud;
   return (
@@ -2501,6 +2540,72 @@ function ProcessInformationPanel({
         </div>
       </div>
       <MutationError error={enrichError} />
+      <MutationError error={selectSourceError} />
+      {complementary.review_reason && (
+        <div className="h-stack items-start gap-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+          <AlertTriangle className="mt-0.5 shrink-0 text-warning" size={18} aria-hidden="true" />
+          <div className="v-stack gap-1">
+            <strong>Revisao de instancia necessaria</strong>
+            <span>{complementary.review_reason}</span>
+          </div>
+        </div>
+      )}
+      {detail.sources.length > 0 && (
+        <div className="v-stack gap-2">
+          <div className="h-stack flex-wrap items-center gap-2">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-neutral-600">
+              Instancias oficiais
+            </h4>
+            <Badge>{detail.sources.length}</Badge>
+          </div>
+          <div className="grid gap-2 lg:grid-cols-2">
+            {detail.sources.map((source) => (
+              <div
+                key={source.id}
+                className={cn(
+                  "v-stack gap-2 rounded-md border border-line bg-neutral-50 p-3",
+                  {
+                    "border-emerald-300 bg-emerald-50": source.selected_for_cover,
+                    "border-amber-300 bg-amber-50": source.review_required,
+                  },
+                )}
+              >
+                <div className="h-stack flex-wrap items-center gap-2">
+                  <Badge>{source.source}</Badge>
+                  <Badge>{source.degree ?? "Grau ausente"}</Badge>
+                  {source.selected_for_cover && (
+                    <span className="text-xs font-semibold text-success">Capa atual</span>
+                  )}
+                </div>
+                <span className="text-sm font-semibold">
+                  {source.process_class ?? "Classe ausente"}
+                </span>
+                <span className="text-xs text-neutral-700">
+                  {source.agency ?? "Orgao ausente"} · {source.tribunal ?? "Tribunal ausente"}
+                </span>
+                <span className="break-all font-mono text-[11px] text-neutral-500">
+                  {source.source_record_id}
+                </span>
+                {!source.selected_for_cover && source.numero_processo === detail.numero_processo && (
+                  <button
+                    className="ui-button self-start"
+                    type="button"
+                    disabled={isSelectingSource}
+                    onClick={() => onSelectSource(source.id)}
+                  >
+                    Usar como capa atual
+                  </button>
+                )}
+                {source.numero_processo !== detail.numero_processo && (
+                  <span className="text-xs font-semibold text-danger">
+                    Numero divergente: {source.numero_processo}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="grid gap-3 md:grid-cols-4">
         <Metric label="Classe" value={detail.process_class ?? "Ausente"} />
         <Metric label="Orgao" value={detail.agency ?? "Ausente"} />
@@ -2511,7 +2616,8 @@ function ProcessInformationPanel({
         <Metric label="Sistema" value={complementary.system ?? "Ausente"} />
         <Metric label="Formato" value={complementary.format ?? "Ausente"} />
         <Metric label="Atualizacao" value={formatDateTime(complementary.source_updated_at)} />
-        <Metric label="Movs. complementares" value={complementary.movements_count} />
+        <Metric label="Movimentos DataJud" value={complementary.movements_count} />
+        <Metric label="Hits DataJud" value={complementary.hit_count} />
       </div>
       {complementary.subjects.length > 0 && (
         <div className="h-stack flex-wrap gap-2">
@@ -2525,59 +2631,30 @@ function ProcessInformationPanel({
   );
 }
 
-function ComplementaryMovements({ detail }: { detail: ProcessDetail }) {
-  const movements = detail.datajud.movements;
-  if (movements.length === 0) {
-    return null;
-  }
-  return (
-    <div className="v-stack gap-3 border-b border-line pb-4">
-      <div className="h-stack flex-wrap items-center gap-2">
-        <h3 className="text-sm font-semibold">Historico complementar</h3>
-        <Badge>{movements.length}</Badge>
-      </div>
-      <div className="v-stack max-h-80 gap-2 overflow-y-auto pr-1">
-        {movements.map((movement, index) => (
-          <article
-            key={`${movement.codigo ?? "sem-codigo"}-${movement.data_hora ?? index}`}
-            className="ui-list-item v-stack gap-2"
-          >
-            <div className="h-stack flex-wrap items-center gap-2">
-              <Badge>{movement.codigo ?? "Sem codigo"}</Badge>
-              <span className="text-sm font-semibold">{movement.nome ?? "Movimento sem nome"}</span>
-              <span className="text-xs text-neutral-600">{formatDateTime(movement.data_hora)}</span>
-            </div>
-            {movement.orgao_julgador && (
-              <span className="text-xs text-neutral-600">{movement.orgao_julgador}</span>
-            )}
-            {movement.complementos.length > 0 && (
-              <div className="h-stack flex-wrap gap-2">
-                {movement.complementos.map((complement) => (
-                  <Badge key={complement}>{complement}</Badge>
-                ))}
-              </div>
-            )}
-          </article>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function TimelineItem({ communication, terms }: { communication: Communication; terms: string[] }) {
+function TimelineItem({ event, terms }: { event: ProcessTimelineEvent; terms: string[] }) {
+  const sourceLabel = event.source === "DJEN" ? "Publicacao DJEN" : "Movimento DataJud";
   return (
     <article className="ui-card v-stack gap-3">
       <div className="h-stack flex-wrap items-center gap-2">
-        <Badge>{communication.sigla_tribunal ?? "Tribunal ausente"}</Badge>
-        <Badge>{communication.tipo_comunicacao ?? "Tipo ausente"}</Badge>
+        <span
+          className={cn("rounded-md border px-2 py-1 text-xs font-semibold", {
+            "border-blue-200 bg-brand-50 text-brand-700": event.source === "DJEN",
+            "border-emerald-200 bg-emerald-50 text-success": event.source === "DATAJUD",
+          })}
+        >
+          {sourceLabel}
+        </span>
+        <Badge>{event.tribunal ?? "Tribunal ausente"}</Badge>
+        {event.degree && <Badge>{event.degree}</Badge>}
+        <span className="text-sm font-semibold">{event.title ?? "Evento sem titulo"}</span>
         <span className="h-stack items-center gap-1 text-sm text-neutral-600">
           <CalendarDays size={15} aria-hidden="true" />
-          {formatDate(communication.data_disponibilizacao)}
+          {formatDateTime(event.occurred_at)}
         </span>
-        {communication.external_link && (
+        {event.external_link && (
           <a
             className="ui-icon-button"
-            href={communication.external_link}
+            href={event.external_link}
             target="_blank"
             rel="noreferrer noopener"
             title="Abrir inteiro teor"
@@ -2586,9 +2663,25 @@ function TimelineItem({ communication, terms }: { communication: Communication; 
           </a>
         )}
       </div>
-      <RiskEvidenceList matches={communication.risk_matches} />
+      {(event.process_class || event.agency) && (
+        <div className="h-stack flex-wrap gap-2 text-xs text-neutral-600">
+          {event.process_class && <span>Classe: {event.process_class}</span>}
+          {event.agency && <span>Orgao: {event.agency}</span>}
+        </div>
+      )}
+      <span className="break-all font-mono text-[11px] text-neutral-500">
+        Registro de origem: {event.source_record_id}
+      </span>
+      <RiskEvidenceList matches={event.risk_matches} />
+      {event.complements.length > 0 && (
+        <div className="h-stack flex-wrap gap-2">
+          {event.complements.map((complement) => (
+            <Badge key={complement}>{complement}</Badge>
+          ))}
+        </div>
+      )}
       <p className="whitespace-pre-wrap text-sm leading-6 text-neutral-800">
-        <HighlightedText text={communication.plain_text} terms={terms} />
+        <HighlightedText text={event.text} terms={terms} />
       </p>
     </article>
   );
@@ -2612,7 +2705,11 @@ function SelectFilter({
         <option value="">Todos</option>
         {options.map((option) => (
           <option key={option} value={option}>
-            {label === "Data" ? formatDate(option) : option}
+            {label === "Data"
+              ? formatDate(option)
+              : label === "Tipo"
+                ? eventTypeLabel(option)
+                : option}
           </option>
         ))}
       </select>
@@ -2957,6 +3054,8 @@ function ProcessDataStatusBadge({ status }: { status: string }) {
   const style =
     status === "synced"
       ? "border-emerald-200 bg-emerald-50 text-success"
+      : status === "needs_review"
+        ? "border-amber-300 bg-amber-50 text-warning"
       : status === "error"
         ? "border-red-200 bg-red-50 text-danger"
         : status === "not_found"
@@ -2965,6 +3064,22 @@ function ProcessDataStatusBadge({ status }: { status: string }) {
   return (
     <span className={cn("rounded-md border px-2 py-1 text-xs font-semibold", style)}>
       {processDataStatusLabel(status)}
+    </span>
+  );
+}
+
+function AssociationStatusBadge({ status }: { status: string }) {
+  const style =
+    status === "confirmed"
+      ? "border-emerald-200 bg-emerald-50 text-success"
+      : status === "probable"
+        ? "border-blue-200 bg-brand-50 text-brand-700"
+        : status === "rejected"
+          ? "border-red-200 bg-red-50 text-danger"
+          : "border-amber-200 bg-amber-50 text-warning";
+  return (
+    <span className={cn("rounded-md border px-2 py-1 text-xs font-semibold", style)}>
+      {associationStatusLabel(status)}
     </span>
   );
 }
@@ -3399,7 +3514,33 @@ function processDataStatusLabel(status: string): string {
   if (status === "error") {
     return "Erro no detalhamento";
   }
+  if (status === "needs_review") {
+    return "Requer revisao";
+  }
   return "Pendente";
+}
+
+function associationStatusLabel(status: string): string {
+  if (status === "confirmed") {
+    return "Confirmado";
+  }
+  if (status === "probable") {
+    return "Provavel";
+  }
+  if (status === "rejected") {
+    return "Rejeitado";
+  }
+  return "Incerto";
+}
+
+function eventTypeLabel(eventType: string): string {
+  if (eventType === "publication") {
+    return "Publicacao";
+  }
+  if (eventType === "procedural_movement") {
+    return "Movimento processual";
+  }
+  return eventType;
 }
 
 function partySourceLabel(source: string): string {

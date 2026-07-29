@@ -3,31 +3,49 @@ from datetime import date
 from sqlalchemy import func, select
 
 from app import db
-from app.datajud import DATAJUD_STATUS_ERROR, DATAJUD_STATUS_SYNCED, DataJudSearchResult
+from app.datajud import (
+    DATAJUD_STATUS_ERROR,
+    DATAJUD_STATUS_NEEDS_REVIEW,
+    DATAJUD_STATUS_SYNCED,
+    DataJudHit,
+    DataJudSearchResult,
+)
 from app.djen import DjenPage, DjenRateLimitError
 from app.importer import DjenImporter, process_next_queued_run
 from app.models import (
     Client,
+    ClientCommunication,
     ClientProcess,
     Communication,
     CommunicationLawyer,
     CommunicationParty,
     CommunicationRiskMatch,
+    CommunicationVersion,
     Lawyer,
     Process,
+    ProcessAuditIssue,
+    ProcessEvent,
+    ProcessSource,
     RiskKeyword,
     SearchRun,
+    SourceSnapshot,
     WorkerInstance,
 )
 from app.utils import (
     CPF_STATUS_ABSENT,
-    CPF_STATUS_DIVERGENT,
     CPF_STATUS_PRESENT,
     format_process_number,
     normalize_cpf,
     normalize_name,
 )
 from tests.test_datajud import datajud_source
+
+
+def valid_cnj(value: str) -> str:
+    digits = "".join(character for character in value if character.isdigit())
+    base = f"{digits[:7]}{digits[9:]}00"
+    check_digits = 98 - (int(base) % 97)
+    return f"{digits[:7]}{check_digits:02d}{digits[9:]}"
 
 
 class FakeDjenClient:
@@ -78,7 +96,7 @@ class SleepRecorder:
 def djen_item(
     item_id: int,
     *,
-    process_number: str = "00012345620248260100",
+    process_number: str = "00012347120248260100",
     party_cpf: str | None = "123.456.789-01",
 ) -> dict:
     party = {"nome": "Joao da Silva", "polo": "P"}
@@ -92,7 +110,7 @@ def djen_item(
         "tipoComunicacao": "Intimacao",
         "nomeOrgao": "1 Vara Civel",
         "texto": "<p>Intimacao com prazo de 10 dias</p>",
-        "numero_processo": process_number,
+        "numero_processo": valid_cnj(process_number),
         "meio": "D",
         "link": "https://example.test/comunicacao",
         "nomeClasse": "Procedimento Comum Civel",
@@ -340,7 +358,14 @@ async def test_importer_classifies_absent_and_divergent_cpf(session) -> None:
 
     statuses = (await session.execute(select(ClientProcess.cpf_status))).scalars().all()
     assert CPF_STATUS_ABSENT in statuses
-    assert CPF_STATUS_DIVERGENT in statuses
+    associations = (
+        await session.execute(
+            select(ClientCommunication.association_status).order_by(
+                ClientCommunication.association_status
+            )
+        )
+    ).scalars().all()
+    assert associations == ["probable", "rejected"]
 
 
 async def test_importer_classifies_new_communication_with_active_risk_keyword(session) -> None:
@@ -408,7 +433,7 @@ async def test_importer_enriches_process_with_datajud_once_per_run(session) -> N
 
     process = (await session.execute(select(Process))).scalar_one()
     assert len(fake_datajud.calls) == 1
-    assert fake_datajud.calls[0]["numero_processo"] == "00012345620248260100"
+    assert fake_datajud.calls[0]["numero_processo"] == "00012347120248260100"
     assert fake_datajud.calls[0]["tribunal"] == "TJSP"
     assert process.datajud_status == DATAJUD_STATUS_SYNCED
     assert process.datajud_alias == "tjsp"
@@ -445,8 +470,8 @@ async def test_importer_records_datajud_error_without_failing_djen_import(sessio
 async def test_importer_enriches_process_by_number_with_larger_window(session) -> None:
     client = Client(name="Joao da Silva", normalized_name=normalize_name("Joao da Silva"), cpf=None)
     process = Process(
-        numero_processo="00012345620248260100",
-        formatted_number=format_process_number("00012345620248260100"),
+        numero_processo="00012347120248260100",
+        formatted_number=format_process_number("00012347120248260100"),
         tribunal="TJSP",
         datajud_status="pending",
     )
@@ -493,8 +518,8 @@ async def test_importer_enriches_process_by_number_with_larger_window(session) -
     assert result.start_date == date(2024, 1, 10)
     assert result.djen_items_found == 1
     assert result.djen_imported == 1
-    assert fake_datajud.calls == [{"numero_processo": "00012345620248260100", "tribunal": "TJSP"}]
-    assert fake_djen.calls[0]["numero_processo"] == "00012345620248260100"
+    assert fake_datajud.calls == [{"numero_processo": "00012347120248260100", "tribunal": "TJSP"}]
+    assert fake_djen.calls[0]["numero_processo"] == "00012347120248260100"
     assert fake_djen.calls[0]["start_date"] == date(2024, 1, 10)
     assert await session.scalar(select(func.count(Communication.id))) == 1
     client_process = (await session.execute(select(ClientProcess))).scalar_one()
@@ -528,3 +553,252 @@ async def test_importer_ignores_duplicate_lawyer_links_in_same_communication(ses
     assert await session.scalar(select(func.count(Communication.id))) == 1
     assert await session.scalar(select(func.count(Lawyer.id))) == 1
     assert await session.scalar(select(func.count(CommunicationLawyer.id))) == 1
+
+
+async def test_datajud_multiple_hits_are_persisted_without_overwriting_cover(session) -> None:
+    client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    session.add(client)
+    await session.flush()
+    first = {
+        **datajud_source(),
+        "id": "source-g1",
+        "grau": "G1",
+        "dataHoraUltimaAtualizacao": "2024-02-16T12:00:00.000Z",
+    }
+    second = {
+        **datajud_source(),
+        "id": "source-g2",
+        "grau": "G2",
+        "classe": {"codigo": 999, "nome": "Recurso DataJud"},
+        "dataHoraUltimaAtualizacao": "2025-03-20T12:00:00.000Z",
+    }
+    incompatible = {
+        **datajud_source(),
+        "id": "source-other-process",
+        "numeroProcesso": "00002827520248160131",
+        "dataHoraUltimaAtualizacao": "2025-04-20T12:00:00.000Z",
+    }
+    results = [
+        DataJudSearchResult(
+            alias="tjsp",
+            total=3,
+            hits=(
+                DataJudHit(source_id="source-g1", source=first),
+                DataJudHit(source_id="source-other-process", source=incompatible),
+                DataJudHit(source_id="source-g2", source=second),
+            ),
+        ),
+        DataJudSearchResult(
+            alias="tjsp",
+            total=3,
+            hits=(
+                DataJudHit(source_id="source-g2", source=second),
+                DataJudHit(source_id="source-g1", source=first),
+                DataJudHit(source_id="source-other-process", source=incompatible),
+            ),
+        ),
+    ]
+    fake_datajud = FakeDataJudClient(results)
+    importer = DjenImporter(
+        session,
+        FakeDjenClient([]),
+        datajud_client=fake_datajud,
+        sleep=noop_sleep,
+        rate_limit_sleep_seconds=0,
+    )
+
+    await importer.import_items(client, [djen_item(700)])
+    process = (await session.execute(select(Process))).scalar_one()
+    first_candidate_id = process.datajud_candidate_source_id
+    await importer._maybe_enrich_process_with_datajud(process, force=True)
+    await session.commit()
+
+    assert process.datajud_status == DATAJUD_STATUS_NEEDS_REVIEW
+    assert process.process_class == "Procedimento Comum Civel"
+    assert process.datajud_payload is None
+    assert process.datajud_hit_count == 3
+    assert process.datajud_source_id is None
+    assert process.datajud_candidate_source_id == first_candidate_id
+    assert await session.scalar(select(func.count(ProcessSource.id))) == 3
+    assert await session.scalar(select(func.count(SourceSnapshot.id))) == 3
+    assert await session.scalar(
+        select(func.count(ProcessEvent.id)).where(ProcessEvent.source == "DATAJUD")
+    ) == 4
+
+
+async def test_djen_rectification_relinks_and_versions_communication(session) -> None:
+    client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    second_client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    session.add_all([client, second_client])
+    await session.flush()
+    importer = DjenImporter(session, FakeDjenClient([]), sleep=noop_sleep)
+    original = djen_item(710)
+    corrected_number = valid_cnj("00043210020248260101")
+    corrected = djen_item(710, process_number=corrected_number)
+    corrected["nomeClasse"] = "Execucao corrigida"
+    corrected["nomeOrgao"] = "4 Vara Civel"
+    corrected["destinatarios"][0]["polo"] = "A"
+
+    assert await importer.import_items(client, [original]) == 1
+    assert await importer.import_items(second_client, [original]) == 0
+    communication = (await session.execute(select(Communication))).scalar_one()
+    old_process_id = communication.process_id
+    assert await importer.import_items(client, [corrected]) == 0
+    assert await importer.import_items(client, [corrected]) == 0
+    await session.commit()
+    await session.refresh(communication)
+
+    assert communication.numero_processo == corrected_number
+    assert communication.process_id != old_process_id
+    assert communication.nome_classe == "Execucao corrigida"
+    assert communication.nome_orgao == "4 Vara Civel"
+    versions = (
+        await session.execute(select(CommunicationVersion))
+    ).scalars().all()
+    assert len(versions) == 1
+    assert versions[0].previous_numero_processo == original["numero_processo"]
+    event = (
+        await session.execute(
+            select(ProcessEvent).where(ProcessEvent.communication_id == communication.id)
+        )
+    ).scalar_one()
+    assert event.process_id == communication.process_id
+    assert event.process_class == "Execucao corrigida"
+    assert await session.scalar(
+        select(func.count(ClientProcess.id)).where(
+            ClientProcess.process_id == old_process_id
+        )
+    ) == 0
+    assert await session.scalar(
+        select(func.count(ClientProcess.id)).where(
+            ClientProcess.process_id == communication.process_id
+        )
+    ) == 2
+    target_links = (
+        await session.execute(
+            select(ClientProcess).where(
+                ClientProcess.process_id == communication.process_id
+            )
+        )
+    ).scalars().all()
+    assert {link.polo for link in target_links} == {"A"}
+    assert {link.cpf_status for link in target_links} == {CPF_STATUS_PRESENT}
+
+
+async def test_djen_metadata_update_refreshes_cover_and_is_idempotent(session) -> None:
+    client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    session.add(client)
+    await session.flush()
+    importer = DjenImporter(session, FakeDjenClient([]), sleep=noop_sleep)
+    original = djen_item(715)
+    updated = djen_item(715)
+    updated["nomeClasse"] = "Cumprimento de sentenca"
+    updated["nomeOrgao"] = "5 Vara Civel"
+
+    assert await importer.import_items(client, [original]) == 1
+    assert await importer.import_items(client, [updated]) == 0
+    assert await importer.import_items(client, [updated]) == 0
+    await session.commit()
+
+    communication = (await session.execute(select(Communication))).scalar_one()
+    process = (await session.execute(select(Process))).scalar_one()
+    versions = (
+        await session.execute(select(CommunicationVersion))
+    ).scalars().all()
+    event = (
+        await session.execute(
+            select(ProcessEvent).where(ProcessEvent.communication_id == communication.id)
+        )
+    ).scalar_one()
+
+    assert communication.numero_processo == process.numero_processo
+    assert communication.nome_classe == "Cumprimento de sentenca"
+    assert communication.nome_orgao == "5 Vara Civel"
+    assert process.process_class == "Cumprimento de sentenca"
+    assert process.agency == "5 Vara Civel"
+    assert len(versions) == 1
+    assert versions[0].change_reason == "source_metadata_updated"
+    assert event.process_class == "Cumprimento de sentenca"
+    assert event.agency == "5 Vara Civel"
+
+
+async def test_djen_identifier_collision_is_sent_to_review(session) -> None:
+    client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=normalize_cpf("12345678901"),
+    )
+    session.add(client)
+    await session.flush()
+    importer = DjenImporter(session, FakeDjenClient([]), sleep=noop_sleep)
+    await importer.import_items(
+        client,
+        [
+            djen_item(720),
+            djen_item(721, process_number=valid_cnj("00043210020248260102")),
+        ],
+    )
+    collision = djen_item(720)
+    collision["hash"] = "hash-721"
+
+    assert await importer.import_items(client, [collision]) == 0
+    reused_auxiliary_identifier = djen_item(722)
+    reused_auxiliary_identifier["hash"] = "hash-720"
+    assert await importer.import_items(client, [reused_auxiliary_identifier]) == 0
+    await session.commit()
+
+    assert await session.scalar(select(func.count(Communication.id))) == 2
+    issues = (
+        await session.execute(
+            select(ProcessAuditIssue).where(
+                ProcessAuditIssue.issue_type == "djen_identifier_collision"
+            )
+        )
+    ).scalars().all()
+    assert len(issues) == 2
+    assert {issue.status for issue in issues} == {"open"}
+    assert sorted(len(issue.details["communication_ids"]) for issue in issues) == [1, 2]
+    source_ids = (
+        await session.execute(select(Communication.djen_id).order_by(Communication.djen_id))
+    ).scalars().all()
+    assert source_ids == [720, 721]
+
+
+async def test_invalid_cnj_is_not_promoted_to_process(session) -> None:
+    client = Client(
+        name="Joao da Silva",
+        normalized_name=normalize_name("Joao da Silva"),
+        cpf=None,
+    )
+    session.add(client)
+    await session.flush()
+    importer = DjenImporter(session, FakeDjenClient([]), sleep=noop_sleep)
+    invalid = djen_item(730)
+    invalid["numero_processo"] = "12345"
+
+    assert await importer.import_items(client, [invalid]) == 0
+    await session.commit()
+
+    assert await session.scalar(select(func.count(Process.id))) == 0
+    assert await session.scalar(select(func.count(Communication.id))) == 0
+    assert await session.scalar(
+        select(func.count(ProcessAuditIssue.id)).where(
+            ProcessAuditIssue.issue_type == "invalid_cnj_number"
+        )
+    ) == 1

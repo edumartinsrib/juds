@@ -155,7 +155,10 @@ export type ProcessListItem = {
   process_class: string | null;
   agency: string | null;
   external_link: string | null;
+  cpf_status: string;
   polo: string | null;
+  association_status: "confirmed" | "probable" | "uncertain" | "rejected" | string;
+  association_reason: string | null;
   communications_count: number;
   last_movement_at: string | null;
   datajud_status: string;
@@ -235,15 +238,60 @@ export type DataJudInfo = {
   format: string | null;
   subjects: string[];
   movements_count: number;
+  hit_count: number;
+  source_id: string | null;
+  candidate_source_id: string | null;
+  selection_reason: string | null;
+  review_reason: string | null;
   error: string | null;
   movements: DataJudMovement[];
+};
+
+export type ProcessSource = {
+  id: string;
+  source: string;
+  source_alias: string | null;
+  source_record_id: string;
+  numero_processo: string;
+  tribunal: string | null;
+  degree: string | null;
+  process_class: string | null;
+  agency: string | null;
+  source_updated_at: string | null;
+  filed_at: string | null;
+  selected_for_cover: boolean;
+  selection_reason: string | null;
+  review_required: boolean;
+};
+
+export type ProcessTimelineEvent = {
+  event_id: string;
+  process_id: string;
+  communication_id: string | null;
+  source: "DJEN" | "DATAJUD" | string;
+  source_record_id: string;
+  event_type: "publication" | "procedural_movement" | string;
+  occurred_at: string;
+  tribunal: string | null;
+  degree: string | null;
+  process_class: string | null;
+  agency: string | null;
+  title: string | null;
+  text: string;
+  complements: string[];
+  external_link: string | null;
+  risk_matches: RiskMatch[];
 };
 
 export type ProcessDetail = ProcessListItem & {
   datajud: DataJudInfo;
   parties: Party[];
   lawyers: Lawyer[];
-  timeline: Communication[];
+  sources: ProcessSource[];
+  timeline: ProcessTimelineEvent[];
+  djen_publications_count: number;
+  datajud_movements_count: number;
+  total_events: number;
 };
 
 export type ProcessEnrichment = {

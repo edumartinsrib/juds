@@ -160,6 +160,16 @@ export function enrichProcess(
   });
 }
 
+export function selectProcessSource(
+  processId: string,
+  sourceId: string,
+): Promise<ProcessDetail> {
+  return request<ProcessDetail>(
+    `/api/processes/${processId}/sources/${sourceId}/select`,
+    { method: "POST" },
+  );
+}
+
 export function getCommunication(communicationId: string): Promise<CommunicationDetail> {
   return request<CommunicationDetail>(`/api/communications/${communicationId}`);
 }

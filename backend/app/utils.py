@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from dataclasses import dataclass
 from datetime import date, datetime
 from html import unescape
 from typing import Any
@@ -12,6 +13,20 @@ from bs4 import BeautifulSoup
 CPF_STATUS_ABSENT = "ausente_no_djen"
 CPF_STATUS_PRESENT = "presente_no_djen"
 CPF_STATUS_DIVERGENT = "cpf_divergente"
+
+ASSOCIATION_CONFIRMED = "confirmed"
+ASSOCIATION_PROBABLE = "probable"
+ASSOCIATION_UNCERTAIN = "uncertain"
+ASSOCIATION_REJECTED = "rejected"
+
+
+@dataclass(frozen=True)
+class ClientAssociationMatch:
+    status: str
+    reason: str
+    party_name: str | None
+    party_document: str | None
+    polo: str | None
 
 
 def only_digits(value: str | None) -> str:
@@ -55,6 +70,22 @@ def format_process_number(value: str | None) -> str:
     )
 
 
+def is_valid_cnj_number(value: str | None) -> bool:
+    """Validate the 20-digit CNJ number, including its modulo-97 check digits."""
+    digits = normalize_process_number(value)
+    if len(digits) != 20:
+        return False
+    base = f"{digits[:7]}{digits[9:]}00"
+    return 98 - (int(base) % 97) == int(digits[7:9])
+
+
+def require_valid_cnj_number(value: str | None) -> str:
+    digits = normalize_process_number(value)
+    if not is_valid_cnj_number(digits):
+        raise ValueError("Numero de processo invalido: esperado CNJ com 20 digitos validos")
+    return digits
+
+
 def parse_djen_date(value: Any) -> date:
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
@@ -95,11 +126,143 @@ def djen_fingerprint(item: dict[str, Any]) -> str:
 
 
 def party_matches_client(client_name: str, party_name: str) -> bool:
+    client_tokens = _name_tokens(client_name)
+    party_tokens = _name_tokens(party_name)
+    if len(client_tokens) < 2 or len(party_tokens) < 2:
+        return False
+    return client_tokens == party_tokens or client_tokens.issubset(party_tokens)
+
+
+def classify_client_association(
+    client_name: str,
+    client_cpf: str | None,
+    parties: list[dict[str, Any]],
+) -> ClientAssociationMatch:
+    normalized_client_cpf = normalize_document(client_cpf)
+    candidates: list[ClientAssociationMatch] = []
+
+    for party in parties:
+        if not isinstance(party, dict):
+            continue
+        party_name = str(
+            get_first(party, "nome", "nomeParte", "nome_parte") or ""
+        ).strip()
+        if not party_name:
+            continue
+        party_document = normalize_document(
+            str(get_first(party, "cpf_cnpj", "cpfCnpj", "documento", "cpf") or "")
+        )
+        polo = str(get_first(party, "polo") or "").strip() or None
+        name_quality = _name_match_quality(client_name, party_name)
+
+        if normalized_client_cpf and party_document:
+            if normalized_client_cpf == party_document:
+                candidates.append(
+                    ClientAssociationMatch(
+                        status=ASSOCIATION_CONFIRMED,
+                        reason="documento_exato",
+                        party_name=party_name,
+                        party_document=party_document,
+                        polo=polo,
+                    )
+                )
+            elif name_quality in {"exact", "full_tokens", "partial_tokens"}:
+                candidates.append(
+                    ClientAssociationMatch(
+                        status=ASSOCIATION_REJECTED,
+                        reason="documento_divergente",
+                        party_name=party_name,
+                        party_document=party_document,
+                        polo=polo,
+                    )
+                )
+            continue
+
+        if name_quality == "exact":
+            candidates.append(
+                ClientAssociationMatch(
+                    status=ASSOCIATION_PROBABLE,
+                    reason="nome_exato_sem_documento",
+                    party_name=party_name,
+                    party_document=party_document,
+                    polo=polo,
+                )
+            )
+        elif name_quality == "full_tokens":
+            candidates.append(
+                ClientAssociationMatch(
+                    status=ASSOCIATION_PROBABLE,
+                    reason="tokens_completos_sem_documento",
+                    party_name=party_name,
+                    party_document=party_document,
+                    polo=polo,
+                )
+            )
+        elif name_quality == "partial_tokens":
+            candidates.append(
+                ClientAssociationMatch(
+                    status=ASSOCIATION_UNCERTAIN,
+                    reason="nome_parcial",
+                    party_name=party_name,
+                    party_document=party_document,
+                    polo=polo,
+                )
+            )
+
+    if not candidates:
+        return ClientAssociationMatch(
+            status=ASSOCIATION_UNCERTAIN,
+            reason="destinatario_incompativel_ou_ausente",
+            party_name=None,
+            party_document=None,
+            polo=None,
+        )
+
+    priority = {
+        ASSOCIATION_CONFIRMED: 4,
+        ASSOCIATION_PROBABLE: 3,
+        ASSOCIATION_UNCERTAIN: 2,
+        ASSOCIATION_REJECTED: 1,
+    }
+    return max(candidates, key=lambda candidate: priority[candidate.status])
+
+
+def merge_association_status(current: str | None, new_status: str) -> str:
+    priority = {
+        ASSOCIATION_REJECTED: 0,
+        ASSOCIATION_UNCERTAIN: 1,
+        ASSOCIATION_PROBABLE: 2,
+        ASSOCIATION_CONFIRMED: 3,
+    }
+    if not current:
+        return new_status
+    return new_status if priority.get(new_status, 0) > priority.get(current, 0) else current
+
+
+def _name_tokens(value: str) -> set[str]:
+    particles = {"DA", "DAS", "DE", "DO", "DOS", "E"}
+    return {
+        token
+        for token in normalize_name(value).split()
+        if len(token) >= 2 and token not in particles
+    }
+
+
+def _name_match_quality(client_name: str, party_name: str) -> str:
     client = normalize_name(client_name)
     party = normalize_name(party_name)
     if not client or not party:
-        return False
-    return client in party or party in client
+        return "none"
+    if client == party:
+        return "exact"
+    client_tokens = _name_tokens(client)
+    party_tokens = _name_tokens(party)
+    if len(client_tokens) >= 2 and client_tokens.issubset(party_tokens):
+        return "full_tokens"
+    overlap = client_tokens & party_tokens
+    if len(overlap) >= 2 and len(overlap) / max(len(client_tokens), 1) >= 0.6:
+        return "partial_tokens"
+    return "none"
 
 
 def normalize_document(value: str | None) -> str | None:
