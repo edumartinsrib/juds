@@ -1,27 +1,14 @@
+import type { ClassValue } from "clsx";
+import type { CSSProperties } from "react";
+
+import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 
-export type ClassName =
-  | string
-  | false
-  | null
-  | undefined
-  | Record<string, boolean | null | undefined>;
+export type ClassName = ClassValue;
+export type ClassNameRecord<Key extends string> = { [K in Key]?: ClassName };
+type Style = CSSProperties & { [key: `--${string}`]: string | number };
+export type StyleRecord<Key extends string> = { [K in Key]?: Style };
 
 export function cn(...values: ClassName[]): string {
-  const classes: string[] = [];
-  for (const value of values) {
-    if (!value) {
-      continue;
-    }
-    if (typeof value === "string") {
-      classes.push(value);
-      continue;
-    }
-    for (const [key, enabled] of Object.entries(value)) {
-      if (enabled) {
-        classes.push(key);
-      }
-    }
-  }
-  return twMerge(classes.join(" "));
+  return twMerge(clsx(values));
 }

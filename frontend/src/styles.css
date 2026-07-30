@@ -3,15 +3,102 @@
 @tailwind utilities;
 
 @layer base {
-  :root {
+  :root,
+  .light {
     color-scheme: light;
+    --paper: 216 28% 97%;
+    --surface: 0 0% 100%;
+    --surface-raised: 0 0% 100%;
+    --foreground: 218 32% 14%;
+    --muted: 216 12% 42%;
+    --muted-surface: 216 24% 94%;
+    --line: 216 21% 86%;
+    --brand: 213 73% 42%;
+    --brand-strong: 215 76% 34%;
+    --brand-soft: 213 75% 95%;
+    --success: 153 63% 31%;
+    --success-soft: 150 57% 94%;
+    --warning: 35 78% 34%;
+    --warning-soft: 39 92% 94%;
+    --danger: 3 69% 43%;
+    --danger-soft: 4 74% 95%;
+    --shadow: 218 32% 14%;
+    --radius-sm: 0.375rem;
+    --radius-md: 0.625rem;
+    --radius-lg: 0.875rem;
+    --motion-fast: 140ms;
+    --motion-normal: 220ms;
+  }
+
+  .dark {
+    color-scheme: dark;
+    --paper: 218 27% 9%;
+    --surface: 218 24% 12%;
+    --surface-raised: 218 22% 15%;
+    --foreground: 216 25% 93%;
+    --muted: 216 12% 66%;
+    --muted-surface: 218 20% 18%;
+    --line: 217 18% 25%;
+    --brand: 211 76% 62%;
+    --brand-strong: 211 76% 69%;
+    --brand-soft: 214 39% 19%;
+    --success: 153 52% 55%;
+    --success-soft: 154 33% 17%;
+    --warning: 39 72% 59%;
+    --warning-soft: 37 37% 18%;
+    --danger: 4 71% 65%;
+    --danger-soft: 4 38% 18%;
+    --shadow: 220 40% 3%;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .system {
+      color-scheme: dark;
+      --paper: 218 27% 9%;
+      --surface: 218 24% 12%;
+      --surface-raised: 218 22% 15%;
+      --foreground: 216 25% 93%;
+      --muted: 216 12% 66%;
+      --muted-surface: 218 20% 18%;
+      --line: 217 18% 25%;
+      --brand: 211 76% 62%;
+      --brand-strong: 211 76% 69%;
+      --brand-soft: 214 39% 19%;
+      --success: 153 52% 55%;
+      --success-soft: 154 33% 17%;
+      --warning: 39 72% 59%;
+      --warning-soft: 37 37% 18%;
+      --danger: 4 71% 65%;
+      --danger-soft: 4 38% 18%;
+      --shadow: 220 40% 3%;
+    }
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    min-width: 320px;
+    background: hsl(var(--paper));
+    text-rendering: optimizeLegibility;
   }
 
   body {
     margin: 0;
+    min-width: 320px;
+    min-height: 100dvh;
+    overflow-x: hidden;
+    background: hsl(var(--paper));
+    color: hsl(var(--foreground));
     font-family:
-      Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: #f7f8fb;
+      Geist,
+      "Aptos",
+      "Segoe UI Variable",
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      sans-serif;
   }
 
   button,
@@ -20,58 +107,256 @@
   textarea {
     font: inherit;
   }
+
+  button,
+  a,
+  input,
+  select,
+  textarea,
+  summary {
+    outline: none;
+  }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--brand));
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: hsl(var(--brand-soft));
+    color: hsl(var(--foreground));
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      scroll-behavior: auto !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 }
 
 @layer components {
-  .ui-panel {
-    @apply rounded-md border border-line bg-white p-4 shadow-subtle;
-  }
-
-  .ui-card {
-    @apply rounded-md border border-line bg-white p-4 shadow-subtle transition hover:border-brand-500;
-  }
-
-  .ui-list-item {
-    @apply rounded-md border border-line bg-white p-3 transition hover:border-brand-500;
-  }
-
   .ui-button {
-    @apply min-h-10 rounded-md border border-line bg-white px-3 py-2 text-sm font-semibold text-ink shadow-subtle transition hover:border-brand-500 hover:text-brand-700 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0;
+    @apply h-stack min-h-10 items-center justify-center gap-2 rounded-md border border-line bg-surface px-3 py-2 text-sm font-semibold text-foreground shadow-subtle transition duration-200 hover:border-brand hover:text-brand active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0;
   }
 
   .ui-button-primary {
-    @apply border-brand-600 bg-brand-600 text-white hover:border-brand-700 hover:bg-brand-700 hover:text-white;
+    @apply border-brand bg-brand text-white hover:border-brand-strong hover:bg-brand-strong hover:text-white;
+  }
+
+  .ui-button-ghost {
+    @apply border-transparent bg-transparent shadow-none hover:border-line hover:bg-muted-surface;
+  }
+
+  .ui-button-danger {
+    @apply border-danger bg-danger text-white hover:border-danger hover:bg-danger hover:text-white;
+  }
+
+  .ui-button-sm {
+    @apply min-h-9 px-2.5 py-1.5 text-xs;
   }
 
   .ui-icon-button {
-    @apply center h-9 w-9 rounded-md border border-line bg-white text-ink transition hover:border-brand-500 hover:text-brand-700;
+    @apply center size-10 shrink-0 px-0 py-0;
   }
 
   .ui-input {
-    @apply min-h-10 rounded-md border border-line bg-white px-3 py-2 text-sm outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-50;
+    @apply min-h-10 w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-foreground shadow-[inset_0_1px_0_hsl(var(--foreground)/0.02)] transition duration-200 placeholder:text-muted focus:border-brand focus:ring-2 focus:ring-brand-soft disabled:cursor-not-allowed disabled:bg-muted-surface disabled:opacity-70;
   }
 
-  .ui-tab {
-    @apply min-h-10 shrink-0 rounded-md border border-transparent px-3 py-2 text-sm font-semibold text-neutral-700 transition hover:border-line hover:bg-white;
+  .ui-badge {
+    @apply inline-flex min-h-6 max-w-full items-center rounded-md border border-line bg-surface px-2 py-0.5 text-xs font-semibold leading-5 text-foreground;
   }
 
-  .ui-tab-active {
-    @apply border-brand-600 bg-white text-brand-700 shadow-subtle;
+  .ui-badge-brand {
+    @apply border-brand/30 bg-brand-soft text-brand-strong;
+  }
+
+  .ui-badge-success {
+    @apply border-success/30 bg-success-soft text-success;
+  }
+
+  .ui-badge-warning {
+    @apply border-warning/30 bg-warning-soft text-warning;
+  }
+
+  .ui-badge-danger {
+    @apply border-danger/30 bg-danger-soft text-danger;
   }
 
   .ui-link {
-    @apply text-sm font-semibold text-brand-700 hover:text-brand-600;
+    @apply rounded-sm text-sm font-semibold text-brand underline-offset-4 hover:underline;
   }
 
-  .table-head {
-    @apply border-b border-line bg-neutral-50 px-3 py-3 text-xs font-semibold uppercase text-neutral-600 first:rounded-tl-md last:rounded-tr-md;
+  .ui-panel {
+    @apply min-w-0 rounded-lg border border-line bg-surface p-4 shadow-subtle md:p-5;
   }
 
-  .table-cell {
+  .ui-metric {
+    @apply v-stack min-w-0 gap-1 border-t-2 border-line bg-surface px-3 py-3;
+  }
+
+  .ui-metric > span {
+    @apply text-xs font-semibold uppercase tracking-wide text-muted;
+  }
+
+  .ui-metric > strong {
+    @apply break-words font-mono text-xl font-semibold tabular-nums tracking-tight text-foreground;
+  }
+
+  .ui-nav-item {
+    @apply h-stack min-h-11 items-center gap-3 rounded-md px-3 py-2 text-sm font-semibold text-muted transition duration-200 hover:bg-muted-surface hover:text-foreground active:translate-y-px;
+  }
+
+  .ui-nav-item-active {
+    @apply bg-brand-soft text-brand-strong;
+  }
+
+  .ui-sidebar {
+    @apply fixed inset-y-0 left-0 z-20 gap-1 border-r border-line bg-surface px-3 py-4 shadow-[8px_0_24px_-20px_hsl(var(--shadow)/0.35)] transition-[width] duration-300 motion-reduce:transition-none;
+  }
+
+  .ui-topbar {
+    @apply sticky top-0 z-10 h-stack min-h-16 items-center gap-2 border-b border-line bg-surface/95 px-4 py-2 shadow-[0_8px_20px_-18px_hsl(var(--shadow)/0.32)] backdrop-blur-md md:gap-3 md:px-6 lg:px-8;
+  }
+
+  .ui-dialog-overlay {
+    @apply fixed inset-0 z-40 bg-foreground/35 backdrop-blur-[2px] data-[state=closed]:animate-[fade-out_140ms_ease-in] data-[state=open]:animate-[fade-in_160ms_ease-out];
+  }
+
+  .ui-dialog-content {
+    @apply fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-lg border border-line bg-surface-raised shadow-dialog data-[state=closed]:animate-[dialog-out_140ms_ease-in] data-[state=open]:animate-[dialog-in_200ms_cubic-bezier(0.16,1,0.3,1)];
+  }
+
+  .ui-drawer-content {
+    @apply fixed inset-y-0 z-50 v-stack w-full border-line bg-surface-raised shadow-dialog data-[state=closed]:animate-[fade-out_140ms_ease-in] data-[state=open]:animate-[fade-in_160ms_ease-out] sm:max-w-lg;
+  }
+
+  .ui-menu-content {
+    @apply z-50 min-w-48 rounded-md border border-line bg-surface-raised p-1 shadow-dialog;
+  }
+
+  .ui-menu-item {
+    @apply h-stack min-h-10 cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm font-medium outline-none data-[highlighted]:bg-muted-surface data-[disabled]:pointer-events-none data-[disabled]:opacity-50;
+  }
+
+  .ui-tooltip {
+    @apply z-50 max-w-xs rounded-md bg-foreground px-2.5 py-1.5 text-xs font-medium text-surface shadow-subtle;
+  }
+
+  .ui-toast {
+    @apply h-stack items-start gap-3 rounded-lg border border-line bg-surface-raised p-3 shadow-dialog;
+  }
+
+  .ui-skeleton {
+    @apply block animate-pulse rounded-md bg-muted-surface;
+  }
+
+  .ui-empty-state {
+    @apply v-stack min-h-52 items-center justify-center gap-3 rounded-lg border border-dashed border-line bg-surface/50 p-6;
+  }
+
+  .ui-error-state {
+    @apply h-stack min-h-40 items-start gap-3 rounded-lg border border-danger/30 bg-danger-soft p-5 text-danger;
+  }
+
+  .ui-alert {
+    @apply h-stack items-start gap-3 rounded-md border border-warning/30 bg-warning-soft p-3 text-warning;
+  }
+
+  .ui-alert-brand {
+    @apply border-brand/30 bg-brand-soft text-brand-strong;
+  }
+
+  .ui-alert-success {
+    @apply border-success/30 bg-success-soft text-success;
+  }
+
+  .ui-alert-danger {
+    @apply border-danger/30 bg-danger-soft text-danger;
+  }
+
+  .ui-search-result {
+    @apply h-stack min-h-14 items-center gap-3 rounded-md px-2 py-3 text-left text-sm transition hover:bg-muted-surface active:translate-y-px;
+  }
+
+  .ui-kbd {
+    @apply inline-flex min-h-5 items-center rounded border border-line bg-muted-surface px-1.5 font-mono text-[10px] font-semibold text-muted;
+  }
+
+  .ui-skip-link {
+    @apply fixed left-4 top-3 z-[60] -translate-y-20 rounded-md bg-foreground px-3 py-2 text-sm font-semibold text-surface transition focus:translate-y-0;
+  }
+
+  .ui-data-table {
+    @apply w-full border-separate border-spacing-0 text-left text-sm;
+  }
+
+  .ui-data-table th {
+    @apply sticky top-0 border-b border-line bg-muted-surface px-3 py-3 text-xs font-bold uppercase tracking-wide text-muted;
+  }
+
+  .ui-data-table td {
     @apply border-b border-line px-3 py-3 align-middle;
   }
 
-  .table-row {
-    @apply bg-white transition hover:bg-neutral-50;
+  .ui-data-table tbody tr {
+    @apply bg-surface transition hover:bg-muted-surface/70;
+  }
+}
+
+@media (pointer: coarse) {
+  .ui-button,
+  .ui-input {
+    min-height: 2.75rem;
+  }
+
+  .ui-icon-button {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes dialog-out {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.98);
   }
 }
