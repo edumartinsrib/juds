@@ -92,7 +92,7 @@
     background: hsl(var(--paper));
     color: hsl(var(--foreground));
     font-family:
-      Geist,
+      "Source Sans 3 Variable",
       "Aptos",
       "Segoe UI Variable",
       ui-sans-serif,
