@@ -4,7 +4,7 @@ import httpx
 from sqlalchemy import select
 
 from app.api import get_datajud_client, get_djen_client, get_worker_starter
-from app.datajud import DataJudSearchResult
+from app.datajud import DataJudHit, DataJudSearchResult
 from app.importer import DjenImporter
 from app.main import create_app
 from app.models import Client, Communication, SearchRun, WorkerInstance
@@ -75,7 +75,9 @@ async def test_client_search_run_and_export_flow(session) -> None:
         assert detail["process_parties"] == [
             {"name": "Joao da Silva", "polo": "P", "source": "djen"}
         ]
-        assert detail["timeline"][0]["plain_text"] == "Intimacao com prazo de 10 dias"
+        assert detail["timeline"][0]["source"] == "DJEN"
+        assert detail["timeline"][0]["event_type"] == "publication"
+        assert detail["timeline"][0]["text"] == "Intimacao com prazo de 10 dias"
         assert detail["lawyers"][0]["name"] == "Maria Advogada"
 
         page_response = await client.get(
@@ -161,15 +163,24 @@ async def test_client_search_run_and_export_flow(session) -> None:
         assert enrichment["djen_imported"] == 1
         assert enrichment["process"]["datajud"]["status"] == "synced"
         assert enrichment["process"]["datajud"]["movements_count"] == 2
+        assert enrichment["process"]["djen_publications_count"] == 2
+        assert enrichment["process"]["datajud_movements_count"] == 2
+        assert enrichment["process"]["total_events"] == 4
+        assert [event["source"] for event in enrichment["process"]["timeline"]] == [
+            "DJEN",
+            "DJEN",
+            "DATAJUD",
+            "DATAJUD",
+        ]
         assert {"name": "Autor DataJud", "polo": "A", "source": "datajud"} in enrichment["process"]["process_parties"]
-        assert fake_djen.calls[0]["numero_processo"] == "00012345620248260100"
+        assert fake_djen.calls[0]["numero_processo"] == "00012347120248260100"
 
         communication_id = (
             await session.execute(select(Communication.id).order_by(Communication.djen_id.asc()))
         ).scalars().first()
         communication_response = await client.get(f"/api/communications/{communication_id}")
         assert communication_response.status_code == 200
-        assert communication_response.json()["numero_processo"] == "00012345620248260100"
+        assert communication_response.json()["numero_processo"] == "00012347120248260100"
 
         csv_response = await client.get(
             "/api/exports", params={"client_id": created["id"], "format": "csv"}
@@ -426,3 +437,88 @@ async def test_worker_dashboard_start_and_stop_endpoints(session) -> None:
         stopped = stop_response.json()
         assert stopped["stop_requested"] is True
         assert stopped["effective_status"] == "stopped"
+
+
+async def test_user_selected_datajud_instance_is_preserved_on_resync(session) -> None:
+    async with api_client() as client:
+        created = (
+            await client.post(
+                "/api/clients",
+                json={"name": "Joao da Silva", "cpf": "123.456.789-01"},
+            )
+        ).json()
+
+    db_client = await session.get(Client, created["id"])
+    importer = DjenImporter(session, FakeDjenClient([]), sleep=noop_sleep)
+    await importer.import_items(db_client, [djen_item(990)])
+    await session.commit()
+    process_id = (
+        await session.execute(select(Communication.process_id))
+    ).scalar_one()
+
+    g1 = {
+        **datajud_source(),
+        "id": "instance-g1",
+        "grau": "G1",
+        "classe": {"codigo": 1, "nome": "Classe de primeiro grau"},
+    }
+    g2 = {
+        **datajud_source(),
+        "id": "instance-g2",
+        "grau": "G2",
+        "classe": {"codigo": 2, "nome": "Classe recursal"},
+        "dataHoraUltimaAtualizacao": "2025-02-16T12:00:00.000Z",
+    }
+    ambiguous = DataJudSearchResult(
+        alias="tjsp",
+        total=2,
+        hits=(
+            DataJudHit(source_id="instance-g1", source=g1),
+            DataJudHit(source_id="instance-g2", source=g2),
+        ),
+    )
+    fake_datajud = FakeDataJudClient([ambiguous, ambiguous])
+    fake_djen = FakeDjenClient(
+        [
+            DjenPage(items=[], count=0, rate_limit_limit=100, rate_limit_remaining=99),
+            DjenPage(items=[], count=0, rate_limit_limit=100, rate_limit_remaining=98),
+        ]
+    )
+    overrides = {
+        get_djen_client: lambda: fake_djen,
+        get_datajud_client: lambda: fake_datajud,
+    }
+
+    async with api_client(overrides) as client:
+        first = await client.post(f"/api/processes/{process_id}/enrich", json={})
+        assert first.status_code == 200
+        review = first.json()["process"]
+        assert review["datajud"]["status"] == "needs_review"
+        assert review["process_class"] == "Procedimento Comum Civel"
+        g1_source = next(
+            source for source in review["sources"] if source["degree"] == "G1"
+        )
+
+        selected = await client.post(
+            f"/api/processes/{process_id}/sources/{g1_source['id']}/select"
+        )
+        assert selected.status_code == 200
+        selected_process = selected.json()
+        assert selected_process["datajud"]["status"] == "synced"
+        assert selected_process["process_class"] == "Classe de primeiro grau"
+
+        second = await client.post(f"/api/processes/{process_id}/enrich", json={})
+        assert second.status_code == 200
+        resynced = second.json()["process"]
+        assert resynced["datajud"]["status"] == "synced"
+        assert resynced["process_class"] == "Classe de primeiro grau"
+        assert sum(
+            1 for source in resynced["sources"] if source["selected_for_cover"]
+        ) == 1
+
+        audit = await client.post("/api/integrity/audit")
+        assert audit.status_code == 200
+        assert all(
+            finding["issue_type"] != "datajud_multiple_hits"
+            for finding in audit.json()["findings"]
+        )

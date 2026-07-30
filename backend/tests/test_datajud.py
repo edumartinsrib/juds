@@ -13,8 +13,8 @@ from app.api import _datajud_process_parties
 
 def datajud_source() -> dict:
     return {
-        "id": "TJSP_436_G1_123_00012345620248260100",
-        "numeroProcesso": "00012345620248260100",
+        "id": "TJSP_436_G1_123_00012347120248260100",
+        "numeroProcesso": "00012347120248260100",
         "tribunal": "TJSP",
         "classe": {"codigo": 436, "nome": "Procedimento DataJud"},
         "orgaoJulgador": {"codigo": 123, "nome": "2 Vara Civel"},
@@ -36,7 +36,7 @@ def test_resolves_datajud_aliases() -> None:
     assert resolve_datajud_alias("TJSP") == "tjsp"
     assert resolve_datajud_alias("TRE-SP") == "tre-sp"
     assert resolve_datajud_alias("api_publica_trf1") == "trf1"
-    assert infer_datajud_alias_from_process_number("0001234-56.2024.8.26.0100") == "tjsp"
+    assert infer_datajud_alias_from_process_number("0001234-71.2024.8.26.0100") == "tjsp"
     assert infer_datajud_alias_from_process_number("0000832-35.2018.4.01.3202") == "trf1"
 
 
@@ -48,7 +48,8 @@ async def test_datajud_client_fetches_by_process_number() -> None:
         body = json.loads(request.content)
         assert request.url.path == "/api_publica_tjsp/_search"
         assert request.headers["Authorization"] == "APIKey test-key"
-        assert body["query"]["match"]["numeroProcesso"] == "00012345620248260100"
+        assert body["query"]["match"]["numeroProcesso"] == "00012347120248260100"
+        assert body["size"] == 100
         return httpx.Response(
             200,
             json={
@@ -65,12 +66,49 @@ async def test_datajud_client_fetches_by_process_number() -> None:
         transport=httpx.MockTransport(handler),
     )
 
-    result = await client.fetch_process("0001234-56.2024.8.26.0100", tribunal="TJSP")
+    result = await client.fetch_process("0001234-71.2024.8.26.0100", tribunal="TJSP")
 
     assert len(requests) == 1
     assert result.alias == "tjsp"
     assert result.total == 1
     assert result.source and result.source["classe"]["nome"] == "Procedimento DataJud"
+
+
+async def test_datajud_client_filters_incompatible_first_hit() -> None:
+    incompatible = {
+        **datajud_source(),
+        "numeroProcesso": "00002827520248160131",
+        "classe": {"codigo": 1, "nome": "Processo incorreto"},
+    }
+    compatible = {
+        **datajud_source(),
+        "classe": {"codigo": 2, "nome": "Processo correto"},
+    }
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "hits": {
+                    "total": {"value": 2, "relation": "eq"},
+                    "hits": [
+                        {"_id": "wrong", "_source": incompatible},
+                        {"_id": "right", "_source": compatible},
+                    ],
+                }
+            },
+        )
+
+    result = await DataJudClient(
+        "https://datajud.test",
+        "test-key",
+        transport=httpx.MockTransport(handler),
+    ).fetch_process("0001234-71.2024.8.26.0100", tribunal="TJSP")
+
+    assert result.total == 2
+    assert {hit.source_id for hit in result.hits} == {"right", "wrong"}
+    assert [hit.source_id for hit in result.exact_hits] == ["right"]
+    assert result.source and result.source["classe"]["nome"] == "Processo correto"
 
 
 def test_datajud_movements_are_normalized_newest_first() -> None:

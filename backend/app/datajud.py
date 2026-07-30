@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +14,7 @@ DATAJUD_STATUS_PENDING = "pending"
 DATAJUD_STATUS_SYNCED = "synced"
 DATAJUD_STATUS_NOT_FOUND = "not_found"
 DATAJUD_STATUS_ERROR = "error"
+DATAJUD_STATUS_NEEDS_REVIEW = "needs_review"
 
 STATE_CODES = {
     "01": "ac",
@@ -126,10 +129,33 @@ class DataJudError(Exception):
 
 
 @dataclass(frozen=True)
+class DataJudHit:
+    source_id: str
+    source: dict[str, Any]
+    alias: str | None = None
+
+
+@dataclass(frozen=True)
 class DataJudSearchResult:
     alias: str | None
-    source: dict[str, Any] | None
-    total: int
+    source: dict[str, Any] | None = None
+    total: int = 0
+    hits: tuple[DataJudHit, ...] = ()
+    exact_hits: tuple[DataJudHit, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.hits or not self.source:
+            return
+        hit = DataJudHit(
+            source_id=datajud_source_record_id(self.source),
+            source=self.source,
+        )
+        object.__setattr__(
+            self,
+            "hits",
+            (hit,),
+        )
+        object.__setattr__(self, "exact_hits", (hit,))
 
 
 class DataJudClient:
@@ -154,11 +180,30 @@ class DataJudClient:
             raise DataJudError("Nao foi possivel resolver a fonte complementar do processo")
 
         first_alias = aliases[0]
+        total_hits = 0
+        collected_hits: dict[str, DataJudHit] = {}
         for alias in aliases:
             result = await self._search_alias(alias, process_number)
-            if result.source is not None:
-                return result
-        return DataJudSearchResult(alias=first_alias, source=None, total=0)
+            total_hits += result.total
+            for hit in result.hits:
+                collected_hits[hit.source_id] = hit
+            if result.exact_hits:
+                all_hits = tuple(
+                    sorted(collected_hits.values(), key=datajud_hit_sort_key)
+                )
+                return DataJudSearchResult(
+                    alias=result.alias,
+                    source=result.source,
+                    total=total_hits,
+                    hits=all_hits,
+                    exact_hits=result.exact_hits,
+                )
+        return DataJudSearchResult(
+            alias=first_alias,
+            source=None,
+            total=total_hits,
+            hits=tuple(sorted(collected_hits.values(), key=datajud_hit_sort_key)),
+        )
 
     async def _search_alias(self, alias: str, process_number: str) -> DataJudSearchResult:
         headers = {
@@ -166,7 +211,7 @@ class DataJudClient:
             "Content-Type": "application/json",
         }
         payload = {
-            "size": 1,
+            "size": 100,
             "query": {
                 "match": {
                     "numeroProcesso": process_number,
@@ -193,10 +238,73 @@ class DataJudClient:
 
         payload = response.json()
         hits_container = payload.get("hits") or {}
-        hits = hits_container.get("hits") or []
+        raw_hits = hits_container.get("hits") or []
         total = _hit_total(hits_container.get("total"))
-        source = hits[0].get("_source") if hits else None
-        return DataJudSearchResult(alias=alias, source=source, total=total)
+        all_hits = []
+        for hit in raw_hits:
+            source = hit.get("_source") if isinstance(hit, dict) else None
+            if not isinstance(source, dict):
+                continue
+            all_hits.append(
+                DataJudHit(
+                    source_id=datajud_source_record_id(source, hit.get("_id")),
+                    source=source,
+                    alias=alias,
+                )
+            )
+        all_hits.sort(key=datajud_hit_sort_key)
+        exact_hits = [
+            hit
+            for hit in all_hits
+            if normalize_process_number(str(hit.source.get("numeroProcesso") or ""))
+            == process_number
+        ]
+        exact_hits.sort(key=datajud_hit_sort_key)
+        source = exact_hits[0].source if exact_hits else None
+        return DataJudSearchResult(
+            alias=alias,
+            source=source,
+            total=total,
+            hits=tuple(all_hits),
+            exact_hits=tuple(exact_hits),
+        )
+
+
+def datajud_source_record_id(source: dict[str, Any], hit_id: Any = None) -> str:
+    explicit = hit_id or source.get("id") or source.get("_id")
+    if explicit:
+        return str(explicit).strip()
+    payload = json.dumps(source, ensure_ascii=False, sort_keys=True, default=str)
+    return f"datajud-{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def datajud_hit_sort_key(hit: DataJudHit) -> tuple[float, str]:
+    updated_at = parse_datajud_datetime(hit.source.get("dataHoraUltimaAtualizacao"))
+    timestamp = updated_at.timestamp() if updated_at else float("-inf")
+    return (-timestamp, hit.source_id)
+
+
+def select_datajud_hit(
+    hits: tuple[DataJudHit, ...],
+    *,
+    expected_tribunal: str | None,
+) -> tuple[DataJudHit | None, str]:
+    if not hits:
+        return None, "nenhum_hit_exato"
+    expected_alias = resolve_datajud_alias(expected_tribunal)
+    compatible = [
+        hit
+        for hit in hits
+        if not expected_alias
+        or resolve_datajud_alias(str(hit.source.get("tribunal") or "")) == expected_alias
+    ]
+    candidates = compatible or list(hits)
+    selected = sorted(candidates, key=datajud_hit_sort_key)[0]
+    compatibility = "tribunal_compativel" if compatible else "tribunal_nao_confirmado"
+    return (
+        selected,
+        f"{compatibility};mais_recente;desempate_source_record_id",
+    )
 
 
 def candidate_datajud_aliases(tribunal: str | None, numero_processo: str) -> list[str]:
