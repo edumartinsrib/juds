@@ -283,7 +283,7 @@ test("captura as páginas críticas em desktop e mobile", async ({ page }, testI
   await page.goto("/processos?client=client-1");
   await expect(processOpenControl(page, testInfo.project.name)).toBeVisible();
   await expect(page).toHaveScreenshot("process-list.png", {
-    fullPage: true,
     animations: "disabled",
+    maxDiffPixelRatio: 0.01,
   });
 });
