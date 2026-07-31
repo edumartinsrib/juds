@@ -17,6 +17,8 @@ node_modules/
 dist/
 .vite/
 coverage/
+playwright-report/
+test-results/
 *.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
@@ -24,6 +26,7 @@ frontend/vite.config.d.ts
 *.log
 *.sqlite3
 *.db
+/backups/
 
 .DS_Store
 .idea/

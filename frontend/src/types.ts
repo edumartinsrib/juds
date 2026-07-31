@@ -183,8 +183,10 @@ export type Party = {
   id: string;
   communication_id: string;
   name: string;
+  cpf_cnpj_masked: string | null;
   polo: string | null;
   is_client_match: boolean;
+  cpf_status: string;
 };
 
 export type Lawyer = {
@@ -350,4 +352,18 @@ export type RiskMatch = {
   matched_text: string;
   excerpt: string;
   created_at: string;
+};
+
+export type AuditIssue = {
+  id: string;
+  process_id: string | null;
+  communication_id: string | null;
+  issue_key: string;
+  issue_type: string;
+  severity: string;
+  summary: string;
+  details: Record<string, unknown>;
+  status: string;
+  created_at: string;
+  resolved_at: string | null;
 };
