@@ -26,6 +26,7 @@ Gestao local de processos, movimentacoes e informacoes complementares por pessoa
 
 ```bash
 cp .env.example .env
+make migrate
 docker compose up --build
 ```
 
@@ -92,26 +93,74 @@ npm run build
 - `POST /api/risk-keywords/reprocess`
 - `GET /api/exports?client_id=...&format=csv|xlsx`
 
-## Migração segura dos dados existentes
+## Migrations
 
-Antes de subir a versão que contém a migração `0006_process_source_integrity`, gere um backup e registre sua referência:
+Use o comando abaixo na raiz do projeto:
 
 ```bash
-mkdir -p backups
-docker compose exec -T postgres \
-  pg_dump -U "${POSTGRES_USER:-juds}" -d "${POSTGRES_DB:-juds}" \
-  > "backups/juds-before-0006-$(date +%Y%m%d-%H%M%S).sql"
+make migrate
 ```
 
-Defina `JUDS_MIGRATION_BACKUP_REFERENCE` no `.env` com o caminho do backup e então aplique a versão. A migração mantém um relatório antes/depois em `data_migration_runs` e os remapeamentos em `data_migration_mappings`.
+Esse é o fluxo recomendado tanto no primeiro uso quanto depois de atualizar o código. Ele:
 
-Após a subida:
+- valida o Docker, o Compose e o `.env`;
+- sobe somente o PostgreSQL e aguarda o healthcheck;
+- recompila a imagem do backend para não executar migrations antigas;
+- compara a revisão atual com o `head` do Alembic;
+- quando há migrations pendentes, cria e valida um backup em
+  `backups/juds-before-migrate-AAAAMMDD-HHMMSS.dump`;
+- injeta a referência do backup em `JUDS_MIGRATION_BACKUP_REFERENCE`, aplica o `head`
+  e executa `alembic check`.
+
+Se o banco já estiver atualizado, o comando apenas valida o schema e não cria outro backup.
+O diretório `backups/` é local e ignorado pelo Git; cada arquivo é criado com permissão
+privada (`0600`).
+
+Comandos auxiliares:
 
 ```bash
-docker compose exec -T api python -m app.audit \
+make migration-status
+make migration-check
+make migration-history
+```
+
+Evite usar o `alembic upgrade head` manualmente em um banco com dados: esse atalho não cria
+backup nem registra automaticamente sua referência. O startup da API ainda aplica o `head`
+para manter o ambiente local compatível, mas execute `make migrate` antes de
+`docker compose up --build` quando houver dados que precisam ser preservados.
+
+### Solução de problemas
+
+- `Arquivo .env ausente`: execute `cp .env.example .env` e revise as credenciais.
+- Erro ao conectar no Docker: inicie o Docker Engine e repita `make migrate`.
+- Falha na migration: o caminho do backup preservado é mostrado no final da saída. Corrija
+  a causa e execute `make migrate` novamente; migrations concluídas não são reaplicadas.
+- Para mudar apenas o diretório dos backups, execute
+  `JUDS_MIGRATION_BACKUP_DIR=/caminho/seguro make migrate`.
+
+Para restaurar um backup, pare a API e o worker e use o arquivo indicado pelo comando:
+
+```bash
+docker compose stop api worker
+docker compose exec -T postgres sh -ceu \
+  'exec pg_restore --clean --if-exists --no-owner --no-privileges \
+    --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"' \
+  < backups/juds-before-migrate-AAAAMMDD-HHMMSS.dump
+```
+
+A restauração substitui os objetos existentes no banco alvo. Confirme o arquivo e o ambiente
+antes de executá-la.
+
+Após migrations com saneamento de dados, execute também:
+
+```bash
+docker compose run --rm --no-deps api python -m app.audit \
   --repair-normalized-data \
   --resync-flagged \
   --fail-on-findings
 ```
 
-O código de saída `2` indica divergências abertas. Casos legítimos podem ser justificados pela API de ocorrências; a auditoria não reabre uma justificativa registrada.
+O código de saída `2` indica divergências abertas. Casos legítimos podem ser justificados
+pela API de ocorrências; a auditoria não reabre uma justificativa registrada. A migração
+`0006_process_source_integrity` mantém o relatório antes/depois em `data_migration_runs`
+e os remapeamentos em `data_migration_mappings`.
